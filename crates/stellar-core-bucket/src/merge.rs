@@ -39,11 +39,11 @@ pub fn merge_buckets(
             return Ok(Bucket::empty());
         }
         // Normalize init entries to live entries when merging
+        // Note: use iter() instead of entries() to support disk-backed buckets
         let normalized: Vec<_> = new_bucket
-            .entries()
             .iter()
             .filter(|e| should_keep_entry(e, keep_dead_entries))
-            .map(|e| normalize_entry(e.clone()))
+            .map(normalize_entry)
             .collect();
         return Bucket::from_entries(normalized);
     }
@@ -52,9 +52,10 @@ pub fn merge_buckets(
         return Ok(old_bucket.clone());
     }
 
-    // Get iterators for both buckets (already sorted)
-    let old_entries: Vec<_> = old_bucket.entries().iter().collect();
-    let new_entries: Vec<_> = new_bucket.entries().iter().collect();
+    // Get entries from both buckets (already sorted)
+    // Note: use iter() instead of entries() to support disk-backed buckets
+    let old_entries: Vec<BucketEntry> = old_bucket.iter().collect();
+    let new_entries: Vec<BucketEntry> = new_bucket.iter().collect();
 
     let mut merged = Vec::with_capacity(old_entries.len() + new_entries.len());
 
@@ -74,8 +75,8 @@ pub fn merge_buckets(
 
     // Merge the remaining entries
     while old_idx < old_entries.len() && new_idx < new_entries.len() {
-        let old_entry = old_entries[old_idx];
-        let new_entry = new_entries[new_idx];
+        let old_entry = &old_entries[old_idx];
+        let new_entry = &new_entries[new_idx];
 
         let old_key = old_entry.key();
         let new_key = new_entry.key();
@@ -126,7 +127,7 @@ pub fn merge_buckets(
 
     // Add remaining old entries
     while old_idx < old_entries.len() {
-        let entry = old_entries[old_idx];
+        let entry = &old_entries[old_idx];
         if !entry.is_metadata() {
             merged.push(entry.clone());
         }
@@ -135,7 +136,7 @@ pub fn merge_buckets(
 
     // Add remaining new entries
     while new_idx < new_entries.len() {
-        let entry = new_entries[new_idx];
+        let entry = &new_entries[new_idx];
         if !entry.is_metadata() && should_keep_entry(entry, keep_dead_entries) {
             merged.push(normalize_entry(entry.clone()));
         }
@@ -230,26 +231,30 @@ fn merge_entries(
     }
 }
 
-/// Output iterator for streaming merge (memory efficient for large buckets).
-pub struct MergeIterator<'a> {
-    old_entries: &'a [BucketEntry],
-    new_entries: &'a [BucketEntry],
+/// Output iterator for streaming merge.
+///
+/// Note: For disk-backed buckets, entries are collected upfront. For in-memory
+/// buckets, this is still memory-efficient as it references existing entries.
+pub struct MergeIterator {
+    old_entries: Vec<BucketEntry>,
+    new_entries: Vec<BucketEntry>,
     old_idx: usize,
     new_idx: usize,
     keep_dead_entries: bool,
     metadata_done: bool,
 }
 
-impl<'a> MergeIterator<'a> {
+impl MergeIterator {
     /// Create a new merge iterator.
     pub fn new(
-        old_bucket: &'a Bucket,
-        new_bucket: &'a Bucket,
+        old_bucket: &Bucket,
+        new_bucket: &Bucket,
         keep_dead_entries: bool,
     ) -> Self {
+        // Collect entries - works for both in-memory and disk-backed buckets
         Self {
-            old_entries: old_bucket.entries(),
-            new_entries: new_bucket.entries(),
+            old_entries: old_bucket.iter().collect(),
+            new_entries: new_bucket.iter().collect(),
             old_idx: 0,
             new_idx: 0,
             keep_dead_entries,
@@ -258,7 +263,7 @@ impl<'a> MergeIterator<'a> {
     }
 }
 
-impl<'a> Iterator for MergeIterator<'a> {
+impl Iterator for MergeIterator {
     type Item = BucketEntry;
 
     fn next(&mut self) -> Option<Self::Item> {

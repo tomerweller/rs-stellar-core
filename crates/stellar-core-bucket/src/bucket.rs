@@ -2,6 +2,13 @@
 //!
 //! A bucket is an immutable container of ledger entries, stored as gzipped XDR.
 //! Buckets are identified by their content hash (SHA-256 of uncompressed contents).
+//!
+//! Buckets support two storage modes:
+//! - **InMemory**: All entries are loaded into memory (for normal operations, merging)
+//! - **DiskBacked**: Entries are stored on disk and loaded on-demand (for catchup)
+//!
+//! The disk-backed mode is critical for mainnet where buckets can contain millions
+//! of entries. Loading all entries into memory would require many GB of RAM.
 
 use std::collections::BTreeMap;
 use std::io::{BufReader, Read, Write};
@@ -16,8 +23,23 @@ use stellar_xdr::curr::{LedgerEntry, LedgerKey, ReadXdr, WriteXdr, Limits};
 
 use stellar_core_common::Hash256;
 
+use crate::disk_bucket::DiskBucket;
 use crate::entry::{compare_entries, compare_keys, BucketEntry};
 use crate::{BucketError, Result};
+
+/// Storage mode for bucket entries.
+#[derive(Clone)]
+enum BucketStorage {
+    /// All entries loaded in memory.
+    InMemory {
+        entries: Arc<Vec<BucketEntry>>,
+        key_index: Arc<BTreeMap<Vec<u8>, usize>>,
+    },
+    /// Entries stored on disk, loaded on-demand.
+    DiskBacked {
+        disk_bucket: Arc<DiskBucket>,
+    },
+}
 
 /// An immutable bucket file containing sorted ledger entries.
 ///
@@ -27,14 +49,15 @@ use crate::{BucketError, Result};
 /// - Identified by their content hash
 /// - Stored as gzipped XDR on disk
 /// - Sorted by key for efficient merging and lookup
+///
+/// For memory efficiency during catchup, buckets can use disk-backed storage
+/// where entries are loaded on-demand rather than all at once.
 #[derive(Clone)]
 pub struct Bucket {
     /// The hash of this bucket's contents (uncompressed XDR).
     hash: Hash256,
-    /// The entries in this bucket, sorted by key.
-    entries: Arc<Vec<BucketEntry>>,
-    /// Index mapping keys to entry positions for fast lookup.
-    key_index: Arc<BTreeMap<Vec<u8>, usize>>,
+    /// The storage mode (in-memory or disk-backed).
+    storage: BucketStorage,
 }
 
 impl Bucket {
@@ -42,8 +65,10 @@ impl Bucket {
     pub fn empty() -> Self {
         Self {
             hash: Hash256::ZERO,
-            entries: Arc::new(Vec::new()),
-            key_index: Arc::new(BTreeMap::new()),
+            storage: BucketStorage::InMemory {
+                entries: Arc::new(Vec::new()),
+                key_index: Arc::new(BTreeMap::new()),
+            },
         }
     }
 
@@ -70,8 +95,10 @@ impl Bucket {
 
         Ok(Self {
             hash,
-            entries: Arc::new(entries),
-            key_index: Arc::new(key_index),
+            storage: BucketStorage::InMemory {
+                entries: Arc::new(entries),
+                key_index: Arc::new(key_index),
+            },
         })
     }
 
@@ -96,10 +123,37 @@ impl Bucket {
 
     /// Create a bucket from uncompressed XDR bytes without building the key index.
     ///
-    /// This is much more memory efficient for large buckets and should be used
-    /// during catchup when key lookups are not needed.
+    /// **Note**: This still loads all entries into memory. For memory-efficient
+    /// loading during catchup, use `from_xdr_bytes_disk_backed()` instead.
     pub fn from_xdr_bytes_without_index(bytes: &[u8]) -> Result<Self> {
         Self::from_xdr_bytes_internal(bytes, false)
+    }
+
+    /// Create a disk-backed bucket from uncompressed XDR bytes.
+    ///
+    /// This is the most memory-efficient way to load large buckets. Instead of
+    /// parsing all entries into memory, it:
+    /// 1. Saves the XDR bytes to the specified path
+    /// 2. Builds a compact index mapping key hashes to file offsets
+    /// 3. Loads entries on-demand when accessed
+    ///
+    /// This reduces memory usage from O(entries) to O(unique_keys) for the index,
+    /// which is much smaller since we only store 8-byte key hashes and file offsets.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The uncompressed XDR bytes
+    /// * `save_path` - Path where the bucket file will be saved
+    pub fn from_xdr_bytes_disk_backed(bytes: &[u8], save_path: impl AsRef<Path>) -> Result<Self> {
+        let disk_bucket = DiskBucket::from_xdr_bytes(bytes, save_path)?;
+        let hash = disk_bucket.hash();
+
+        Ok(Self {
+            hash,
+            storage: BucketStorage::DiskBacked {
+                disk_bucket: Arc::new(disk_bucket),
+            },
+        })
     }
 
     /// Internal method to create a bucket with optional key index building.
@@ -128,8 +182,10 @@ impl Bucket {
 
         Ok(Self {
             hash,
-            entries: Arc::new(entries),
-            key_index: Arc::new(key_index),
+            storage: BucketStorage::InMemory {
+                entries: Arc::new(entries),
+                key_index: Arc::new(key_index),
+            },
         })
     }
 
@@ -290,14 +346,26 @@ impl Bucket {
     pub fn save_to_file(&self, path: impl AsRef<Path>) -> Result<PathBuf> {
         let path = path.as_ref().to_path_buf();
 
-        // Serialize entries
-        let uncompressed = Self::serialize_entries(&self.entries)?;
+        match &self.storage {
+            BucketStorage::InMemory { entries, .. } => {
+                // Serialize entries
+                let uncompressed = Self::serialize_entries(entries)?;
 
-        // Compress and write
-        let file = std::fs::File::create(&path)?;
-        let mut encoder = GzEncoder::new(file, Compression::default());
-        encoder.write_all(&uncompressed)?;
-        encoder.finish()?;
+                // Compress and write
+                let file = std::fs::File::create(&path)?;
+                let mut encoder = GzEncoder::new(file, Compression::default());
+                encoder.write_all(&uncompressed)?;
+                encoder.finish()?;
+            }
+            BucketStorage::DiskBacked { disk_bucket } => {
+                // For disk-backed buckets, read from disk and compress
+                let uncompressed = std::fs::read(disk_bucket.file_path())?;
+                let file = std::fs::File::create(&path)?;
+                let mut encoder = GzEncoder::new(file, Compression::default());
+                encoder.write_all(&uncompressed)?;
+                encoder.finish()?;
+            }
+        }
 
         Ok(path)
     }
@@ -309,39 +377,89 @@ impl Bucket {
 
     /// Check if this bucket is empty.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty() || self.hash.is_zero()
+        if self.hash.is_zero() {
+            return true;
+        }
+        match &self.storage {
+            BucketStorage::InMemory { entries, .. } => entries.is_empty(),
+            BucketStorage::DiskBacked { disk_bucket } => disk_bucket.is_empty(),
+        }
     }
 
     /// Get the number of entries in this bucket.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        match &self.storage {
+            BucketStorage::InMemory { entries, .. } => entries.len(),
+            BucketStorage::DiskBacked { disk_bucket } => disk_bucket.len(),
+        }
+    }
+
+    /// Check if this bucket uses disk-backed storage.
+    pub fn is_disk_backed(&self) -> bool {
+        matches!(&self.storage, BucketStorage::DiskBacked { .. })
     }
 
     /// Iterate over entries in this bucket.
-    pub fn iter(&self) -> impl Iterator<Item = &BucketEntry> {
-        self.entries.iter()
+    ///
+    /// For in-memory buckets, this is efficient. For disk-backed buckets,
+    /// this reads entries from disk sequentially.
+    pub fn iter(&self) -> BucketIter<'_> {
+        match &self.storage {
+            BucketStorage::InMemory { entries, .. } => {
+                BucketIter::InMemory(entries.iter())
+            }
+            BucketStorage::DiskBacked { disk_bucket } => {
+                // For disk-backed, we create an iterator that reads from disk
+                match disk_bucket.iter() {
+                    Ok(iter) => BucketIter::DiskBacked(iter),
+                    Err(_) => BucketIter::Empty,
+                }
+            }
+        }
     }
 
     /// Get entries as a slice.
+    ///
+    /// **Note**: This only works for in-memory buckets. For disk-backed buckets,
+    /// use `iter()` instead.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called on a disk-backed bucket.
     pub fn entries(&self) -> &[BucketEntry] {
-        &self.entries
+        match &self.storage {
+            BucketStorage::InMemory { entries, .. } => entries,
+            BucketStorage::DiskBacked { .. } => {
+                panic!("entries() not supported for disk-backed buckets, use iter() instead")
+            }
+        }
     }
 
     /// Look up an entry by its key.
-    pub fn get(&self, key: &LedgerKey) -> Result<Option<&BucketEntry>> {
-        let key_bytes = key
-            .to_xdr(Limits::none())
-            .map_err(|e| BucketError::Serialization(format!("Failed to serialize key: {}", e)))?;
+    ///
+    /// For in-memory buckets, returns a reference. For disk-backed buckets,
+    /// loads the entry from disk.
+    pub fn get(&self, key: &LedgerKey) -> Result<Option<BucketEntry>> {
+        match &self.storage {
+            BucketStorage::InMemory { entries, key_index } => {
+                let key_bytes = key
+                    .to_xdr(Limits::none())
+                    .map_err(|e| BucketError::Serialization(format!("Failed to serialize key: {}", e)))?;
 
-        if let Some(&idx) = self.key_index.get(&key_bytes) {
-            Ok(self.entries.get(idx))
-        } else {
-            Ok(None)
+                if let Some(&idx) = key_index.get(&key_bytes) {
+                    Ok(entries.get(idx).cloned())
+                } else {
+                    Ok(None)
+                }
+            }
+            BucketStorage::DiskBacked { disk_bucket } => {
+                disk_bucket.get(key)
+            }
         }
     }
 
     /// Look up a ledger entry by key, returning None if dead or not found.
-    pub fn get_entry(&self, key: &LedgerKey) -> Result<Option<&LedgerEntry>> {
+    pub fn get_entry(&self, key: &LedgerKey) -> Result<Option<LedgerEntry>> {
         match self.get(key)? {
             Some(BucketEntry::Live(entry)) | Some(BucketEntry::Init(entry)) => Ok(Some(entry)),
             Some(BucketEntry::Dead(_)) => Ok(None), // Entry is deleted
@@ -353,22 +471,26 @@ impl Bucket {
     /// Binary search for an entry by key.
     ///
     /// Returns the index of the entry if found, or None.
+    ///
+    /// **Note**: Only works for in-memory buckets. Returns None for disk-backed.
     pub fn binary_search(&self, key: &LedgerKey) -> Option<usize> {
-        let entries = &*self.entries;
-
-        let result = entries.binary_search_by(|entry| {
-            match entry.key() {
-                Some(entry_key) => compare_keys(&entry_key, key),
-                None => std::cmp::Ordering::Less, // Metadata sorts first
+        match &self.storage {
+            BucketStorage::InMemory { entries, .. } => {
+                let result = entries.binary_search_by(|entry| {
+                    match entry.key() {
+                        Some(entry_key) => compare_keys(&entry_key, key),
+                        None => std::cmp::Ordering::Less, // Metadata sorts first
+                    }
+                });
+                result.ok()
             }
-        });
-
-        result.ok()
+            BucketStorage::DiskBacked { .. } => None,
+        }
     }
 
     /// Get the protocol version from bucket metadata, if present.
     pub fn protocol_version(&self) -> Option<u32> {
-        for entry in self.entries.iter() {
+        for entry in self.iter() {
             if let BucketEntry::Metadata(meta) = entry {
                 return Some(meta.ledger_version);
             }
@@ -377,16 +499,51 @@ impl Bucket {
     }
 
     /// Convert bucket contents to uncompressed XDR bytes.
+    ///
+    /// **Note**: Only works for in-memory buckets.
     pub fn to_xdr_bytes(&self) -> Result<Vec<u8>> {
-        Self::serialize_entries(&self.entries)
+        match &self.storage {
+            BucketStorage::InMemory { entries, .. } => Self::serialize_entries(entries),
+            BucketStorage::DiskBacked { disk_bucket } => {
+                // Read from disk file
+                let path = disk_bucket.file_path();
+                let bytes = std::fs::read(path)?;
+                Ok(bytes)
+            }
+        }
+    }
+}
+
+/// Iterator over bucket entries.
+pub enum BucketIter<'a> {
+    /// Iterating over in-memory entries.
+    InMemory(std::slice::Iter<'a, BucketEntry>),
+    /// Iterating over disk-backed entries.
+    DiskBacked(crate::disk_bucket::DiskBucketIter),
+    /// Empty iterator (for error cases).
+    Empty,
+}
+
+impl<'a> Iterator for BucketIter<'a> {
+    type Item = BucketEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            BucketIter::InMemory(iter) => iter.next().cloned(),
+            BucketIter::DiskBacked(iter) => iter.next().and_then(|r| r.ok()),
+            BucketIter::Empty => None,
+        }
     }
 }
 
 impl std::fmt::Debug for Bucket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let entry_count = self.len();
+        let is_disk_backed = self.is_disk_backed();
         f.debug_struct("Bucket")
             .field("hash", &self.hash.to_hex())
-            .field("entries", &self.entries.len())
+            .field("entries", &entry_count)
+            .field("disk_backed", &is_disk_backed)
             .finish()
     }
 }

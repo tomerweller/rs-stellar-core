@@ -323,9 +323,13 @@ impl CatchupManager {
     /// Apply downloaded buckets to build the initial bucket list state.
     /// Returns (live_bucket_list, hot_archive_bucket_list).
     ///
-    /// Note: This method ignores the pre-downloaded buckets parameter and downloads
-    /// buckets on-demand to reduce peak memory usage. For mainnet with 33 buckets
-    /// totaling many GB, holding all raw data in memory causes OOM.
+    /// This method uses disk-backed bucket storage to handle mainnet's large buckets
+    /// efficiently. Instead of loading all entries into memory, each bucket is:
+    /// 1. Downloaded and saved to disk
+    /// 2. Indexed with a compact key-to-offset mapping
+    /// 3. Entries are loaded on-demand when accessed
+    ///
+    /// This reduces memory usage from O(entries) to O(unique_keys) for the index.
     async fn apply_buckets(
         &self,
         has: &HistoryArchiveState,
@@ -336,18 +340,22 @@ impl CatchupManager {
         use stellar_core_bucket::Bucket;
 
         info!(
-            "Applying buckets to build state at ledger {}",
+            "Applying buckets to build state at ledger {} (disk-backed mode)",
             has.current_ledger
         );
+
+        // Get bucket storage directory from the bucket manager
+        let bucket_dir = self.bucket_manager.bucket_dir();
 
         // Cache for buckets we've already loaded (to avoid re-downloading)
         // Using Mutex for interior mutability in the closure
         let bucket_cache: Mutex<HashMap<Hash256, Bucket>> = Mutex::new(HashMap::new());
 
-        // Clone archives for use in closure
+        // Clone archives and bucket_dir for use in closure
         let archives = self.archives.clone();
+        let bucket_dir = bucket_dir.to_path_buf();
 
-        // Helper to load a bucket - downloads on-demand and caches
+        // Helper to load a bucket - downloads on-demand, saves to disk, and caches
         let load_bucket = |hash: &Hash256| -> stellar_core_bucket::Result<Bucket> {
             // Zero hash means empty bucket
             if hash.is_zero() {
@@ -360,6 +368,21 @@ impl CatchupManager {
                 if let Some(bucket) = cache.get(hash) {
                     return Ok(bucket.clone());
                 }
+            }
+
+            // Construct path for this bucket
+            let bucket_path = bucket_dir.join(format!("{}.bucket", hash.to_hex()));
+
+            // Check if bucket already exists on disk
+            if bucket_path.exists() {
+                debug!("Loading existing bucket {} from disk", hash);
+                let bucket = Bucket::from_xdr_bytes_disk_backed(
+                    &std::fs::read(&bucket_path)?,
+                    &bucket_path,
+                )?;
+                let mut cache = bucket_cache.lock().unwrap();
+                cache.insert(*hash, bucket.clone());
+                return Ok(bucket);
             }
 
             // Download the bucket (blocking - we're in a sync context)
@@ -387,20 +410,32 @@ impl CatchupManager {
                 })?
             };
 
-            // Parse the bucket from XDR bytes WITHOUT building key index.
-            // This is critical for mainnet which has buckets with 7+ million entries.
-            // Building the key_index would use ~500MB+ per large bucket.
-            let bucket = Bucket::from_xdr_bytes_without_index(&xdr_data)?;
+            info!(
+                "Downloaded bucket {}: {} bytes, saving to disk",
+                hash,
+                xdr_data.len()
+            );
+
+            // Create the bucket using disk-backed storage.
+            // This saves the XDR to disk and builds a compact index.
+            // Entries are NOT loaded into memory - they're read from disk on-demand.
+            let bucket = Bucket::from_xdr_bytes_disk_backed(&xdr_data, &bucket_path)?;
 
             // Verify hash matches
             if bucket.hash() != *hash {
+                // Clean up the bad file
+                let _ = std::fs::remove_file(&bucket_path);
                 return Err(stellar_core_bucket::BucketError::HashMismatch {
                     expected: hash.to_hex(),
                     actual: bucket.hash().to_hex(),
                 });
             }
 
-            debug!("Loaded bucket {} with {} entries", hash, bucket.len());
+            info!(
+                "Created disk-backed bucket {} with {} entries",
+                hash,
+                bucket.len()
+            );
 
             // Cache the bucket (it might be referenced multiple times in the bucket list)
             {

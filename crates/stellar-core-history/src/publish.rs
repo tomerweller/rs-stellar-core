@@ -307,7 +307,8 @@ impl PublishManager {
         let mut encoder = GzEncoder::new(file, Compression::default());
 
         // Serialize each bucket entry to XDR
-        for entry in bucket.entries() {
+        // Note: use iter() instead of entries() to support disk-backed buckets
+        for entry in bucket.iter() {
             let xdr_entry = entry.to_xdr_entry();
             let xdr = xdr_entry
                 .to_xdr(stellar_xdr::curr::Limits::none())

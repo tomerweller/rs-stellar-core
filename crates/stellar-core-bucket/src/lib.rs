@@ -62,6 +62,7 @@
 
 mod bucket;
 mod bucket_list;
+mod disk_bucket;
 mod entry;
 mod error;
 mod manager;
@@ -70,6 +71,7 @@ mod merge;
 // Re-export main types
 pub use bucket::Bucket;
 pub use bucket_list::{BucketLevel, BucketList, BucketListStats, BUCKET_LIST_LEVELS};
+pub use disk_bucket::{DiskBucket, DiskBucketIter};
 pub use entry::{compare_entries, compare_keys, ledger_entry_to_key, BucketEntry};
 pub use error::BucketError;
 pub use manager::{BucketManager, BucketManagerStats};

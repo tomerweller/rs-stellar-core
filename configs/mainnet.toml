@@ -1,0 +1,62 @@
+[node]
+name = "rs-stellar-core-mainnet"
+is_validator = false
+
+# Trust the SDF mainnet validators
+[node.quorum_set]
+threshold_percent = 66
+validators = [
+    "GCGB2S2KGYARPVIA37HBER46GJSTA5IEUU5CDRVG6VKKOJRUKP72UTQD",
+    "GCM6QMP3DLBER7FAXFNUUQSM6MF5AWEWTLTUMHV76QOQZV57VFLPKHNU",
+    "GABMKJM6I25XI4K7U6XWMULOUQIQ27BCTMLS6BYYSOWKTBUXVRJSXHYQ",
+]
+inner_sets = []
+
+[network]
+passphrase = "Public Global Stellar Network ; September 2015"
+base_fee = 100
+base_reserve = 5000000
+max_protocol_version = 22
+
+[database]
+path = "/home/tomer/rs-stellar-core/mainnet.db"
+pool_size = 10
+
+[buckets]
+directory = "/home/tomer/rs-stellar-core/buckets"
+cache_size = 256
+
+[[history.archives]]
+name = "sdf1"
+url = "https://history.stellar.org/prd/core-live/core_live_001"
+get_enabled = true
+put_enabled = false
+
+[[history.archives]]
+name = "sdf2"
+url = "https://history.stellar.org/prd/core-live/core_live_002"
+get_enabled = true
+put_enabled = false
+
+[[history.archives]]
+name = "sdf3"
+url = "https://history.stellar.org/prd/core-live/core_live_003"
+get_enabled = true
+put_enabled = false
+
+[overlay]
+peer_port = 11625
+max_inbound_peers = 64
+max_outbound_peers = 8
+target_outbound_peers = 8
+known_peers = [
+    "core-live-a.stellar.org:11625",
+    "core-live-b.stellar.org:11625",
+    "core-live-c.stellar.org:11625",
+]
+preferred_peers = []
+
+[logging]
+level = "info"
+format = "text"
+colors = true
