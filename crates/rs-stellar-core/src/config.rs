@@ -36,6 +36,10 @@ pub struct AppConfig {
     /// Logging configuration.
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    /// HTTP server configuration.
+    #[serde(default)]
+    pub http: HttpConfig,
 }
 
 /// Node identity and behavior configuration.
@@ -312,6 +316,40 @@ impl Default for LoggingConfig {
     }
 }
 
+/// HTTP server configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpConfig {
+    /// Whether to enable the HTTP server.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Port for the HTTP server.
+    #[serde(default = "default_http_port")]
+    pub port: u16,
+
+    /// Address to bind the HTTP server to.
+    #[serde(default = "default_http_address")]
+    pub address: String,
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: default_http_port(),
+            address: default_http_address(),
+        }
+    }
+}
+
+fn default_http_port() -> u16 {
+    11626
+}
+
+fn default_http_address() -> String {
+    "0.0.0.0".to_string()
+}
+
 // Default value functions
 
 fn default_node_name() -> String {
@@ -426,6 +464,7 @@ impl AppConfig {
                 ..Default::default()
             },
             logging: LoggingConfig::default(),
+            http: HttpConfig::default(),
         }
     }
 
@@ -467,6 +506,7 @@ impl AppConfig {
                 ..Default::default()
             },
             logging: LoggingConfig::default(),
+            http: HttpConfig::default(),
         }
     }
 

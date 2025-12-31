@@ -118,6 +118,10 @@ pub async fn run_node(config: AppConfig, options: RunOptions) -> anyhow::Result<
     // Validate mode-specific requirements
     validate_run_options(&config, &options)?;
 
+    // Store HTTP config before moving config
+    let http_enabled = config.http.enabled;
+    let http_port = config.http.port;
+
     // Create the application
     let app = Arc::new(App::new(config).await?);
 
@@ -129,6 +133,18 @@ pub async fn run_node(config: AppConfig, options: RunOptions) -> anyhow::Result<
         shutdown_app.shutdown();
     });
 
+    // Start the HTTP status server if enabled
+    let http_handle = if http_enabled {
+        let status_server = StatusServer::new(http_port, app.clone());
+        Some(tokio::spawn(async move {
+            if let Err(e) = status_server.start().await {
+                tracing::error!(error = %e, "HTTP status server error");
+            }
+        }))
+    } else {
+        None
+    };
+
     // Print startup info
     print_startup_info(&app, &options);
 
@@ -137,6 +153,9 @@ pub async fn run_node(config: AppConfig, options: RunOptions) -> anyhow::Result<
 
     // Clean up
     shutdown_handle.abort();
+    if let Some(handle) = http_handle {
+        handle.abort();
+    }
 
     match result {
         Ok(()) => {
