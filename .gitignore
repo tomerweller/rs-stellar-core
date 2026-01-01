@@ -34,3 +34,5 @@ Thumbs.db
 
 # Source symlinks
 source
+.upstream-v25/
+upstream/
