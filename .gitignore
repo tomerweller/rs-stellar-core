@@ -29,6 +29,9 @@ Thumbs.db
 # Logs
 /logs/
 
+# Local runtime data
+/data/
+
 # Bucket data (large files)
 /buckets/
 /data/buckets/
