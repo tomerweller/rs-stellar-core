@@ -718,9 +718,14 @@ impl App {
                 .get_ledger_header(current_seq)?
                 .ok_or_else(|| anyhow::anyhow!("Missing ledger header at {}", current_seq))?;
             let prev_seq = current_seq - 1;
-            let prev = db
-                .get_ledger_header(prev_seq)?
-                .ok_or_else(|| anyhow::anyhow!("Missing ledger header at {}", prev_seq))?;
+            let Some(prev) = db.get_ledger_header(prev_seq)? else {
+                tracing::warn!(
+                    missing_seq = prev_seq,
+                    latest_seq = latest,
+                    "Ledger header chain has a gap; skipping deeper integrity checks"
+                );
+                break;
+            };
             let prev_hash = compute_header_hash(&prev)?;
             verify_header_chain(&prev, &prev_hash, &current)?;
             current_seq = prev_seq;

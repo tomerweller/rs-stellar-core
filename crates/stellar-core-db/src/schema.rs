@@ -179,9 +179,9 @@ CREATE INDEX IF NOT EXISTS txfeehistory_ledger ON txfeehistory(ledgerseq);
 CREATE TABLE IF NOT EXISTS scphistory (
     nodeid TEXT NOT NULL,
     ledgerseq INTEGER NOT NULL,
-    envelope BLOB NOT NULL,
-    PRIMARY KEY (nodeid, ledgerseq)
+    envelope BLOB NOT NULL
 );
+CREATE INDEX IF NOT EXISTS scphistory_ledger ON scphistory(ledgerseq);
 
 -- SCP quorum information
 CREATE TABLE IF NOT EXISTS scpquorums (

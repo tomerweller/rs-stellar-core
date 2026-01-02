@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use tracing::{info, warn};
 
 /// Current schema version.
-pub const CURRENT_VERSION: i32 = 4;
+pub const CURRENT_VERSION: i32 = 5;
 
 /// A database migration.
 struct Migration {
@@ -64,6 +64,23 @@ const MIGRATIONS: &[Migration] = &[
             );
         "#,
         description: "Add publish queue table for history publishing",
+    },
+    Migration {
+        from_version: 4,
+        to_version: 5,
+        upgrade_sql: r#"
+            ALTER TABLE scphistory RENAME TO scphistory_old;
+            CREATE TABLE IF NOT EXISTS scphistory (
+                nodeid TEXT NOT NULL,
+                ledgerseq INTEGER NOT NULL,
+                envelope BLOB NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS scphistory_ledger ON scphistory(ledgerseq);
+            INSERT INTO scphistory (nodeid, ledgerseq, envelope)
+                SELECT nodeid, ledgerseq, envelope FROM scphistory_old;
+            DROP TABLE scphistory_old;
+        "#,
+        description: "Allow multiple SCP envelopes per node and ledger",
     },
 ];
 
