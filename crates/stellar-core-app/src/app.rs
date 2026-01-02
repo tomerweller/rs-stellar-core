@@ -75,6 +75,14 @@ const PEER_TYPE_INBOUND: i32 = 0;
 const PEER_MAX_FAILURES_TO_SEND: u32 = 10;
 const TX_SET_REQUEST_WINDOW: u64 = 12;
 const MAX_TX_SET_REQUESTS_PER_TICK: usize = 32;
+/// Consensus stuck timeout matching C++ stellar-core's CONSENSUS_STUCK_TIMEOUT_SECONDS.
+/// If no ledger closes within this time while we have buffered ledgers waiting,
+/// we trigger out-of-sync recovery.
+const CONSENSUS_STUCK_TIMEOUT_SECS: u64 = 35;
+
+/// Recovery timer for out-of-sync recovery attempts.
+/// Matches C++ stellar-core's OUT_OF_SYNC_RECOVERY_TIMER.
+const OUT_OF_SYNC_RECOVERY_TIMER_SECS: u64 = 10;
 
 fn build_generalized_tx_set(
     tx_set: &stellar_core_herder::TransactionSet,
@@ -236,6 +244,9 @@ pub struct App {
     tx_set_dont_have: RwLock<HashMap<Hash256, HashSet<stellar_core_overlay::PeerId>>>,
     /// Last time we requested a tx set by hash (throttling).
     tx_set_last_request: RwLock<HashMap<Hash256, TxSetRequestState>>,
+    /// When we detected consensus is stuck (for timeout detection).
+    /// Stores (current_ledger, first_buffered, stuck_start_time, last_recovery_attempt).
+    consensus_stuck_state: RwLock<Option<ConsensusStuckState>>,
     /// SCP latency samples for surveys.
     scp_latency: RwLock<ScpLatencyTracker>,
 
@@ -309,6 +320,33 @@ impl TxAdvertHistory {
 struct TxSetRequestState {
     last_request: Instant,
     next_peer_offset: usize,
+}
+
+/// State for tracking consensus stuck condition.
+/// Matches C++ stellar-core's out-of-sync recovery behavior.
+#[derive(Debug, Clone)]
+struct ConsensusStuckState {
+    /// Current ledger when stuck was detected.
+    current_ledger: u32,
+    /// First buffered ledger when stuck was detected.
+    first_buffered: u32,
+    /// When we first detected the stuck condition.
+    stuck_start: Instant,
+    /// Last time we attempted recovery (broadcast SCP + request state).
+    last_recovery_attempt: Instant,
+    /// Number of recovery attempts made.
+    recovery_attempts: u32,
+}
+
+/// Actions to take when consensus is stuck.
+#[derive(Debug, Clone, Copy)]
+enum ConsensusStuckAction {
+    /// Wait for tx set to arrive.
+    Wait,
+    /// Attempt recovery (broadcast SCP + request state from peers).
+    AttemptRecovery,
+    /// Trigger catchup after timeout.
+    TriggerCatchup,
 }
 
 #[derive(Debug)]
@@ -685,6 +723,7 @@ impl App {
             tx_pending_demands: RwLock::new(VecDeque::new()),
             tx_set_dont_have: RwLock::new(HashMap::new()),
             tx_set_last_request: RwLock::new(HashMap::new()),
+            consensus_stuck_state: RwLock::new(None),
             scp_latency: RwLock::new(ScpLatencyTracker::default()),
             survey_scheduler: RwLock::new(SurveyScheduler::new()),
             survey_nonce: RwLock::new(1),
@@ -2693,12 +2732,148 @@ impl App {
         );
 
         if first_buffered == current_ledger + 1 {
-            tracing::info!(
-                current_ledger,
-                first_buffered,
-                "Sequential ledger available; skipping buffered catchup"
-            );
-            return;
+            // Sequential ledger case - check if we can close it or need recovery
+            let has_tx_set = {
+                let buffer = self.syncing_ledgers.read().await;
+                buffer.get(&first_buffered).map_or(false, |info| info.tx_set.is_some())
+            };
+
+            if has_tx_set {
+                // Tx set is available, clear stuck state and let normal flow handle it
+                *self.consensus_stuck_state.write().await = None;
+                tracing::info!(
+                    current_ledger,
+                    first_buffered,
+                    "Sequential ledger available; skipping buffered catchup"
+                );
+                return;
+            }
+
+            // Tx set is missing - implement C++ out-of-sync recovery behavior
+            let now = Instant::now();
+            let action = {
+                let mut stuck_state = self.consensus_stuck_state.write().await;
+                match stuck_state.as_mut() {
+                    Some(state) if state.current_ledger == current_ledger
+                                && state.first_buffered == first_buffered => {
+                        // Already tracking this stuck condition
+                        let elapsed = state.stuck_start.elapsed().as_secs();
+                        let since_recovery = state.last_recovery_attempt.elapsed().as_secs();
+
+                        if elapsed >= CONSENSUS_STUCK_TIMEOUT_SECS {
+                            // Timeout expired - trigger catchup
+                            tracing::warn!(
+                                current_ledger,
+                                first_buffered,
+                                elapsed_secs = elapsed,
+                                recovery_attempts = state.recovery_attempts,
+                                "Consensus stuck timeout; triggering catchup"
+                            );
+                            *stuck_state = None;
+                            ConsensusStuckAction::TriggerCatchup
+                        } else if since_recovery >= OUT_OF_SYNC_RECOVERY_TIMER_SECS {
+                            // Time for another recovery attempt
+                            state.last_recovery_attempt = now;
+                            state.recovery_attempts += 1;
+                            tracing::info!(
+                                current_ledger,
+                                first_buffered,
+                                elapsed_secs = elapsed,
+                                recovery_attempts = state.recovery_attempts,
+                                timeout_secs = CONSENSUS_STUCK_TIMEOUT_SECS,
+                                "Attempting out-of-sync recovery"
+                            );
+                            ConsensusStuckAction::AttemptRecovery
+                        } else {
+                            // Still waiting
+                            tracing::debug!(
+                                current_ledger,
+                                first_buffered,
+                                elapsed_secs = elapsed,
+                                next_recovery_in = OUT_OF_SYNC_RECOVERY_TIMER_SECS.saturating_sub(since_recovery),
+                                "Waiting for sequential ledger tx set"
+                            );
+                            ConsensusStuckAction::Wait
+                        }
+                    }
+                    _ => {
+                        // Start tracking this stuck condition
+                        tracing::info!(
+                            current_ledger,
+                            first_buffered,
+                            "Consensus stuck detected; starting recovery timer"
+                        );
+                        *stuck_state = Some(ConsensusStuckState {
+                            current_ledger,
+                            first_buffered,
+                            stuck_start: now,
+                            last_recovery_attempt: now,
+                            recovery_attempts: 0,
+                        });
+                        // Immediately attempt first recovery
+                        ConsensusStuckAction::AttemptRecovery
+                    }
+                }
+            };
+
+            match action {
+                ConsensusStuckAction::Wait => return,
+                ConsensusStuckAction::AttemptRecovery => {
+                    // C++ out-of-sync recovery: broadcast recent SCP messages and request state
+                    self.out_of_sync_recovery(current_ledger).await;
+                    return;
+                }
+                ConsensusStuckAction::TriggerCatchup => {
+                    // Recovery attempts exhausted - trigger catchup
+                    let timeout_target = Self::compute_catchup_target_for_timeout(last_buffered);
+                    if let Some(target) = timeout_target {
+                        if self.catchup_in_progress.swap(true, Ordering::SeqCst) {
+                            tracing::info!("Timeout catchup already in progress");
+                            return;
+                        }
+
+                        tracing::info!(
+                            current_ledger,
+                            target,
+                            last_buffered,
+                            "Starting catchup after consensus stuck timeout"
+                        );
+
+                        let catchup_result = self.catchup(CatchupTarget::Ledger(target)).await;
+                        self.catchup_in_progress.store(false, Ordering::SeqCst);
+
+                        match catchup_result {
+                            Ok(result) => {
+                                *self.current_ledger.write().await = result.ledger_seq;
+                                *self.last_processed_slot.write().await = result.ledger_seq as u64;
+                                self.clear_tx_advert_history(result.ledger_seq).await;
+                                self.herder.bootstrap(result.ledger_seq);
+                                let cleaned = self
+                                    .herder
+                                    .cleanup_old_pending_tx_sets(result.ledger_seq as u64 + 1);
+                                if cleaned > 0 {
+                                    tracing::info!(cleaned, "Dropped stale pending tx set requests after recovery catchup");
+                                }
+                                self.prune_tx_set_tracking().await;
+                                if self.is_validator {
+                                    self.set_state(AppState::Validating).await;
+                                } else {
+                                    self.set_state(AppState::Synced).await;
+                                }
+                                tracing::info!(
+                                    ledger_seq = result.ledger_seq,
+                                    "Recovery catchup complete"
+                                );
+                                self.try_apply_buffered_ledgers().await;
+                            }
+                            Err(err) => {
+                                tracing::error!(error = %err, "Recovery catchup failed");
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
         }
 
         let gap = first_buffered.saturating_sub(current_ledger);
@@ -2884,6 +3059,29 @@ impl App {
         }
     }
 
+    /// Compute a catchup target when sequential ledger tx set is unavailable.
+    /// This finds the most recent checkpoint before the last buffered ledger.
+    fn compute_catchup_target_for_timeout(last_buffered: u32) -> Option<u32> {
+        // Find the last ledger of the checkpoint containing last_buffered
+        // This is the ledger right before the next checkpoint starts
+        let checkpoint_start = Self::first_ledger_in_checkpoint(last_buffered);
+
+        // Target is the last ledger of the previous checkpoint
+        // which is checkpoint_start - 1
+        let target = checkpoint_start.saturating_sub(1);
+
+        // If we're too early (within first checkpoint), use last_buffered - 1
+        if target == 0 {
+            let alt_target = last_buffered.saturating_sub(1);
+            if alt_target > 0 {
+                return Some(alt_target);
+            }
+            return None;
+        }
+
+        Some(target)
+    }
+
     async fn prune_tx_set_tracking(&self) {
         let pending: HashSet<Hash256> = self
             .herder
@@ -3022,6 +3220,72 @@ impl App {
                     ledger_seq,
                     error = %e,
                     "Failed to request SCP state from peers"
+                );
+            }
+        }
+    }
+
+    /// Perform out-of-sync recovery matching C++ stellar-core's outOfSyncRecovery().
+    ///
+    /// This broadcasts recent SCP messages to peers and requests SCP state,
+    /// giving the network a chance to provide the missing data before we
+    /// fall back to catchup.
+    async fn out_of_sync_recovery(&self, current_ledger: u32) {
+        tracing::info!(current_ledger, "Performing out-of-sync recovery");
+
+        // Get recent SCP envelopes to broadcast
+        let from_slot = current_ledger.saturating_sub(5) as u64;
+        let (envelopes, _quorum_set) = self.herder.get_scp_state(from_slot);
+
+        let overlay = self.overlay.lock().await;
+        let overlay = match overlay.as_ref() {
+            Some(o) => o,
+            None => {
+                tracing::debug!("No overlay available for out-of-sync recovery");
+                return;
+            }
+        };
+
+        let peer_count = overlay.peer_count();
+        if peer_count == 0 {
+            tracing::debug!("No peers connected for out-of-sync recovery");
+            return;
+        }
+
+        // Broadcast recent SCP envelopes to all peers
+        // This helps peers that might have missed our messages
+        let mut broadcast_count = 0;
+        for envelope in &envelopes {
+            let msg = StellarMessage::ScpMessage(envelope.clone());
+            if let Err(e) = overlay.broadcast(msg).await {
+                tracing::debug!(error = %e, "Failed to broadcast SCP envelope during recovery");
+            } else {
+                broadcast_count += 1;
+            }
+        }
+
+        if broadcast_count > 0 {
+            tracing::info!(
+                broadcast_count,
+                "Broadcast SCP envelopes during out-of-sync recovery"
+            );
+        }
+
+        // Request SCP state from peers
+        let ledger_seq = self.herder.get_min_ledger_seq_to_ask_peers();
+        match overlay.request_scp_state(ledger_seq).await {
+            Ok(count) => {
+                tracing::info!(
+                    ledger_seq,
+                    peers_requested = count,
+                    "Requested SCP state during out-of-sync recovery"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    ledger_seq,
+                    error = %e,
+                    "Failed to request SCP state during out-of-sync recovery"
                 );
             }
         }
@@ -5713,5 +5977,84 @@ mod tests {
         assert_eq!(App::tx_set_start_index(&hash, 3, 1), 2);
         assert_eq!(App::tx_set_start_index(&hash, 3, 2), 0);
         assert_eq!(App::tx_set_start_index(&hash, 3, 3), 1);
+    }
+
+    #[test]
+    fn test_compute_catchup_target_for_timeout() {
+        // Test with last_buffered in the middle of a checkpoint
+        // Checkpoint at 64, 128, 192, etc. (ledgers 63, 127, 191 are checkpoint ends)
+        let last_buffered = 150;
+        let target = App::compute_catchup_target_for_timeout(last_buffered);
+        // last_buffered 150 is in checkpoint starting at 128
+        // Target should be end of previous checkpoint (127)
+        assert_eq!(target, Some(127));
+
+        // Test with last_buffered at start of checkpoint
+        let last_buffered = 128;
+        let target = App::compute_catchup_target_for_timeout(last_buffered);
+        // 128 is first ledger of checkpoint, target should be 127
+        assert_eq!(target, Some(127));
+
+        // Test with last_buffered at end of checkpoint
+        let last_buffered = 191;
+        let target = App::compute_catchup_target_for_timeout(last_buffered);
+        // 191 is last ledger of checkpoint starting at 128
+        // Target should be end of previous checkpoint (127)
+        assert_eq!(target, Some(127));
+
+        // Test with very early ledger (first checkpoint)
+        let last_buffered = 50;
+        let target = App::compute_catchup_target_for_timeout(last_buffered);
+        // First checkpoint is 0-63, so target would be 0-1 = underflow protection
+        // The function uses saturating_sub, so target should be 49 (last_buffered - 1)
+        assert_eq!(target, Some(49));
+
+        // Test edge case: ledger 1
+        let last_buffered = 1;
+        let target = App::compute_catchup_target_for_timeout(last_buffered);
+        // Should return Some(0) or handle gracefully
+        assert!(target.is_none() || target == Some(0));
+    }
+
+    #[test]
+    fn test_consensus_stuck_timeout_constants() {
+        // Verify constants match C++ stellar-core values
+        assert_eq!(CONSENSUS_STUCK_TIMEOUT_SECS, 35);
+        assert_eq!(OUT_OF_SYNC_RECOVERY_TIMER_SECS, 10);
+    }
+
+    #[test]
+    fn test_consensus_stuck_state() {
+        use std::time::Instant;
+
+        let state = ConsensusStuckState {
+            current_ledger: 1000,
+            first_buffered: 1001,
+            stuck_start: Instant::now(),
+            last_recovery_attempt: Instant::now(),
+            recovery_attempts: 0,
+        };
+
+        assert_eq!(state.current_ledger, 1000);
+        assert_eq!(state.first_buffered, 1001);
+        assert_eq!(state.recovery_attempts, 0);
+    }
+
+    #[test]
+    fn test_consensus_stuck_action_variants() {
+        // Verify all action variants exist and can be matched
+        let actions = [
+            ConsensusStuckAction::Wait,
+            ConsensusStuckAction::AttemptRecovery,
+            ConsensusStuckAction::TriggerCatchup,
+        ];
+
+        for action in actions {
+            match action {
+                ConsensusStuckAction::Wait => {}
+                ConsensusStuckAction::AttemptRecovery => {}
+                ConsensusStuckAction::TriggerCatchup => {}
+            }
+        }
     }
 }
