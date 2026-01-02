@@ -5,7 +5,7 @@
 - `crates/` contains the Rust workspace crates. Each module is a crate (e.g., `crates/stellar-core-ledger`, `crates/stellar-core-tx`, `crates/stellar-core-history`).
 - `crates/rs-stellar-core/` is the main binary crate; other crates are libraries.
 - Tests live alongside code in `crates/*/src` and in `crates/*/tests` for integration tests.
-- Docs live in `docs/` and top-level files like `README.md`, `SPEC.md`, and `DOCUMENTATION_ISSUES.md`.
+- Docs live in crate `README.md` files plus top-level `README.md`, `SPEC.md`, and `DOCUMENTATION_ISSUES.md`.
 - Config examples are in `configs/` and `*.toml` at the repo root.
 
 ## Build, Test, and Development Commands

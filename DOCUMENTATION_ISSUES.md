@@ -47,7 +47,7 @@ Could benefit from a consolidated document.
 
 **Discovered**: 2025-12-30, during bucket module implementation
 **Status**: Open
-**Suggested Fix**: Create `docs/bucket-semantics.md` with merge algorithm pseudocode
+**Suggested Fix**: Add a merge-semantics section with pseudocode to `crates/stellar-core-bucket/README.md`
 
 ---
 
@@ -79,7 +79,7 @@ The code implements this but no unified protocol document exists.
 
 **Discovered**: 2025-12-30, during overlay module implementation
 **Status**: Open
-**Suggested Fix**: Create `docs/overlay-auth.md` with protocol sequence diagram
+**Suggested Fix**: Add an authentication protocol section to `crates/stellar-core-overlay/README.md`
 
 ---
 
@@ -97,7 +97,7 @@ The code implements this but no unified protocol document exists.
 
 **Discovered**: 2025-12-30, during tx module implementation
 **Status**: Open
-**Suggested Fix**: Document validation pipeline order in `docs/transactions.md`
+**Suggested Fix**: Document validation pipeline order in `crates/stellar-core-tx/README.md`
 
 ---
 
@@ -111,7 +111,7 @@ The code implements this but no unified protocol document exists.
 
 **Discovered**: 2025-12-30, during ledger module implementation
 **Status**: Open
-**Suggested Fix**: Add architecture overview to `docs/ledger-txn.md`
+**Suggested Fix**: Add a LedgerTxn overview section to `crates/stellar-core-ledger/README.md`
 
 ---
 
@@ -125,7 +125,7 @@ The code implements this but no unified protocol document exists.
 
 **Discovered**: 2025-12-30, during herder module implementation
 **Status**: Open
-**Suggested Fix**: Create `docs/protocol-upgrades.md`
+**Suggested Fix**: Add a protocol upgrades section to `crates/stellar-core-herder/README.md`
 
 ---
 
@@ -139,7 +139,7 @@ The code implements this but no unified protocol document exists.
 
 **Discovered**: 2025-12-30, during tx module implementation
 **Status**: Open
-**Suggested Fix**: Create `docs/soroban-integration.md`
+**Suggested Fix**: Add Soroban integration notes to `crates/stellar-core-tx/README.md`
 
 ---
 

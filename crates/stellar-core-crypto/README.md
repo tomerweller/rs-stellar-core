@@ -1,142 +1,52 @@
 # stellar-core-crypto
 
-Pure Rust cryptographic primitives for rs-stellar-core.
+Pure Rust cryptographic primitives used across rs-stellar-core.
 
 ## Overview
 
-This crate provides all cryptographic operations needed by Stellar Core:
+This crate provides hashing, signatures, key encoding, and sealed-box support used by overlay, SCP, history, and transaction validation. The implementation is pure Rust (no libsodium) and targets deterministic behavior compatible with stellar-core v25.
 
-- **Ed25519 signatures** - Key generation, signing, and verification
-- **SHA-256 hashing** - Hash computation
-- **Short hashing (SipHash-2-4)** - Deterministic short hashes for XDR data
-- **Stellar key encoding** - StrKey format (G..., S..., etc.)
-- **Random number generation** - Cryptographically secure RNG
-- **Sealed box encryption** - Survey payload encryption/decryption (Curve25519)
+## Upstream Mapping
 
-All implementations are pure Rust with no C/C++ dependencies.
+- `src/crypto/*` in stellar-core
+- StrKey and key utilities
+- Short-hash utilities
 
-## Features
+## Key Capabilities
 
-- Pure Rust implementation (no libsodium dependency)
-- Ed25519 keys compatible with Stellar network
-- StrKey encoding/decoding for human-readable keys
-- Thread-safe random number generation
+- Ed25519 key generation, signing, verification
+- SHA-256 hashing and XDR hashing helpers
+- SipHash-2-4 short hashes for deterministic ordering
+- StrKey encode/decode for Stellar key formats
+- Curve25519 sealed boxes for survey payloads
 
-## Key Types
+## Layout
 
-### PublicKey
-
-Ed25519 public key for verifying signatures:
-
-```rust
-use stellar_core_crypto::PublicKey;
-
-// Parse from StrKey format
-let pk = PublicKey::from_strkey("GDKXE2OZMJIPOSLNA6N6F2BVCI3O777I2OOC4BV7VOYUEHYX7RTRYA7Y")?;
-
-// Convert to StrKey
-let strkey = pk.to_strkey();
-
-// Get raw bytes
-let bytes: &[u8; 32] = pk.as_bytes();
+```
+crates/stellar-core-crypto/
+├── src/
+│   ├── lib.rs
+│   ├── hash.rs
+│   ├── short_hash.rs
+│   ├── strkey.rs
+│   ├── xdr.rs
+│   └── error.rs
+└── tests/
 ```
 
-### SecretKey
+## Dependencies (Core)
 
-Ed25519 secret key for signing:
+- `ed25519-dalek`
+- `sha2`
+- `rand`
+- `siphasher`
 
-```rust
-use stellar_core_crypto::SecretKey;
+## Tests To Port
 
-// Generate a new random key
-let sk = SecretKey::generate();
+- `crypto/test/*` from stellar-core (key encoding, signature vectors, short-hash ordering)
 
-// Parse from StrKey format
-let sk = SecretKey::from_strkey("SBKGC.....")?;
+## Security Notes
 
-// Get the corresponding public key
-let pk = sk.public_key();
+- Keys are zeroized on drop where possible.
+- Avoid non-deterministic ordering by always hashing XDR bytes directly.
 
-// Sign data
-let signature = sk.sign(b"message to sign");
-```
-
-### Signature
-
-Ed25519 signature:
-
-```rust
-use stellar_core_crypto::{SecretKey, verify_signature};
-
-let sk = SecretKey::generate();
-let pk = sk.public_key();
-
-// Sign
-let signature = sk.sign(b"message");
-
-// Verify
-assert!(verify_signature(&pk, b"message", &signature));
-```
-
-## StrKey Encoding
-
-Stellar uses StrKey encoding for human-readable keys:
-
-| Prefix | Type | Example |
-|--------|------|---------|
-| `G` | Account ID (public key) | `GDKXE2OZM...` |
-| `S` | Secret seed | `SBKGCM...` |
-| `M` | Muxed account | `MDKXE2OZM...` |
-| `P` | Pre-auth transaction | `PBKGCM...` |
-| `X` | SHA256 hash | `XBKGCM...` |
-
-```rust
-use stellar_core_crypto::{encode_account_id, decode_account_id};
-
-// Encode public key bytes to G... format
-let strkey = encode_account_id(&public_key_bytes);
-
-// Decode G... format to bytes
-let bytes = decode_account_id("GDKXE2OZM...")?;
-```
-
-## Hashing
-
-```rust
-use stellar_core_crypto::sha256;
-
-// Compute SHA-256 hash
-let hash = sha256(b"data to hash");
-```
-
-## Short Hashing
-
-```rust
-use stellar_core_crypto::{compute_hash, initialize, xdr_compute_hash};
-use stellar_xdr::curr::LedgerEntry;
-
-initialize();
-let short = compute_hash(b"payload");
-
-let entry = LedgerEntry::default();
-let short_xdr = xdr_compute_hash(&entry)?;
-```
-
-## Random Generation
-
-```rust
-use stellar_core_crypto::generate_random_bytes;
-
-// Generate 32 random bytes
-let bytes: [u8; 32] = generate_random_bytes();
-```
-
-## Dependencies
-
-- `ed25519-dalek` - Ed25519 implementation
-- `sha2` - SHA-256 implementation
-- `rand` - Random number generation
-
-## License
-
-Apache 2.0
