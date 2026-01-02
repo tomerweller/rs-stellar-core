@@ -3,16 +3,14 @@
 //! The BucketList is Stellar's core data structure for storing ledger state.
 //! It consists of 11 levels, where each level contains two buckets (curr and snap).
 //!
-//! Level 0 spills every ledger.
-//! Level N spills every 2^(2N) ledgers.
+//! Spill boundaries follow stellar-core's `levelShouldSpill` rules based on
+//! level size and half-size, rather than a simple fixed period.
 //!
 //! This creates a log-structured merge tree that efficiently handles
 //! incremental updates while maintaining full history integrity.
 
-use std::sync::Arc;
-
 use sha2::{Digest, Sha256};
-use stellar_xdr::curr::{LedgerEntry, LedgerKey};
+use stellar_xdr::curr::{BucketListType, BucketMetadata, BucketMetadataExt, LedgerEntry, LedgerKey};
 
 use stellar_core_common::Hash256;
 
@@ -24,6 +22,9 @@ use crate::{BucketError, Result};
 /// Number of levels in the BucketList.
 pub const BUCKET_LIST_LEVELS: usize = 11;
 
+const FIRST_PROTOCOL_SUPPORTING_INITENTRY_AND_METAENTRY: u32 = 11;
+const FIRST_PROTOCOL_SUPPORTING_PERSISTENT_EVICTION: u32 = 23;
+
 /// A level in the BucketList, containing curr and snap buckets.
 #[derive(Clone, Debug)]
 pub struct BucketLevel {
@@ -31,6 +32,8 @@ pub struct BucketLevel {
     pub curr: Bucket,
     /// The snapshot from the previous merge.
     pub snap: Bucket,
+    /// The next bucket produced by a merge, awaiting commit.
+    next: Option<Bucket>,
     /// The level number (0-10).
     level: usize,
 }
@@ -41,6 +44,7 @@ impl BucketLevel {
         Self {
             curr: Bucket::empty(),
             snap: Bucket::empty(),
+            next: None,
             level,
         }
     }
@@ -76,6 +80,43 @@ impl BucketLevel {
     /// Get the level number.
     pub fn level_number(&self) -> usize {
         self.level
+    }
+
+    /// Promote the prepared bucket into curr, if any.
+    fn commit(&mut self) {
+        if let Some(next) = self.next.take() {
+            self.curr = next;
+        }
+    }
+
+    /// Snap the current bucket and clear curr.
+    fn snap(&mut self) -> Bucket {
+        let curr = std::mem::replace(&mut self.curr, Bucket::empty());
+        self.snap = curr.clone();
+        curr
+    }
+
+    /// Prepare the next bucket for this level.
+    fn prepare(
+        &mut self,
+        ledger_seq: u32,
+        protocol_version: u32,
+        snap: Bucket,
+        keep_dead_entries: bool,
+    ) -> Result<()> {
+        if self.next.is_some() {
+            return Err(BucketError::Merge("bucket merge already in progress".to_string()));
+        }
+
+        let curr = if BucketList::should_merge_with_empty_curr(ledger_seq, self.level) {
+            Bucket::empty()
+        } else {
+            self.curr.clone()
+        };
+
+        let merged = merge_buckets(&curr, &snap, keep_dead_entries, protocol_version)?;
+        self.next = Some(merged);
+        Ok(())
     }
 }
 
@@ -193,126 +234,114 @@ impl BucketList {
 
     /// Add ledger entries from a newly closed ledger.
     ///
-    /// This method:
-    /// 1. Creates a new bucket from the entries
-    /// 2. Merges it into level 0
-    /// 3. Spills to higher levels as needed
+    /// This mirrors stellar-core's bucket list update pipeline, preparing
+    /// merges on spill boundaries and committing prior merges as needed.
     pub fn add_batch(
         &mut self,
         ledger_seq: u32,
+        protocol_version: u32,
+        bucket_list_type: BucketListType,
+        init_entries: Vec<LedgerEntry>,
         live_entries: Vec<LedgerEntry>,
         dead_entries: Vec<LedgerKey>,
     ) -> Result<()> {
-        // Build entries for the new bucket
-        let mut entries: Vec<BucketEntry> = live_entries
-            .into_iter()
-            .map(BucketEntry::Live)
-            .collect();
+        let use_init = protocol_version >= FIRST_PROTOCOL_SUPPORTING_INITENTRY_AND_METAENTRY;
+        let mut entries: Vec<BucketEntry> = Vec::new();
 
+        if use_init {
+            let mut meta = BucketMetadata {
+                ledger_version: protocol_version,
+                ext: BucketMetadataExt::V0,
+            };
+            if protocol_version >= FIRST_PROTOCOL_SUPPORTING_PERSISTENT_EVICTION {
+                meta.ext = BucketMetadataExt::V1(bucket_list_type);
+            }
+            entries.push(BucketEntry::Metadata(meta));
+        }
+
+        if use_init {
+            entries.extend(init_entries.into_iter().map(BucketEntry::Init));
+        } else {
+            entries.extend(init_entries.into_iter().map(BucketEntry::Live));
+        }
+
+        entries.extend(live_entries.into_iter().map(BucketEntry::Live));
         entries.extend(dead_entries.into_iter().map(BucketEntry::Dead));
 
-        // Create new bucket
         let new_bucket = Bucket::from_entries(entries)?;
 
-        // Add to level 0 and spill as needed
-        self.add_bucket(ledger_seq, new_bucket)?;
-
+        self.add_batch_internal(ledger_seq, protocol_version, new_bucket)?;
         self.ledger_seq = ledger_seq;
-
         Ok(())
     }
 
-    /// Add a bucket to level 0 and handle spills.
-    fn add_bucket(&mut self, ledger_seq: u32, new_bucket: Bucket) -> Result<()> {
-        // Merge new bucket into level 0 curr
-        let level0_curr = &self.levels[0].curr;
-        let merged = merge_buckets(level0_curr, &new_bucket, /* keep_dead_entries */ true)?;
-        self.levels[0].curr = merged;
+    fn add_batch_internal(
+        &mut self,
+        ledger_seq: u32,
+        protocol_version: u32,
+        new_bucket: Bucket,
+    ) -> Result<()> {
+        if ledger_seq == 0 {
+            return Err(BucketError::Merge("ledger sequence must be > 0".to_string()));
+        }
 
-        // Handle spills at each level
-        for i in 0..BUCKET_LIST_LEVELS {
-            if self.should_spill(ledger_seq, i) {
-                self.spill(i)?;
+        for i in (1..BUCKET_LIST_LEVELS).rev() {
+            if Self::level_should_spill(ledger_seq, i - 1) {
+                let snap = self.levels[i - 1].snap();
+                self.levels[i].commit();
+                let keep_dead = Self::keep_tombstone_entries(i);
+                self.levels[i].prepare(ledger_seq, protocol_version, snap, keep_dead)?;
             }
         }
 
+        let keep_dead = Self::keep_tombstone_entries(0);
+        self.levels[0].prepare(ledger_seq, protocol_version, new_bucket, keep_dead)?;
+        self.levels[0].commit();
         Ok(())
     }
 
-    /// Check if a level should spill at the given ledger.
-    ///
-    /// Level 0 spills every ledger.
-    /// Level N spills every 2^(2N) ledgers.
-    fn should_spill(&self, ledger_seq: u32, level: usize) -> bool {
-        if level == 0 {
-            // Level 0 always spills
-            true
-        } else {
-            // Level N spills every 2^(2N) ledgers
-            let period = Self::spill_period(level);
-            ledger_seq % period == 0
+    /// Round down `value` to the nearest multiple of `modulus`.
+    fn round_down(value: u32, modulus: u32) -> u32 {
+        if modulus == 0 {
+            return 0;
         }
+        value & !(modulus - 1)
     }
 
-    /// Get the spill period for a level.
-    ///
-    /// Level 0: 1 (every ledger)
-    /// Level 1: 4 (2^2)
-    /// Level 2: 16 (2^4)
-    /// Level N: 2^(2N)
-    pub fn spill_period(level: usize) -> u32 {
-        if level == 0 {
-            1
-        } else {
-            1u32 << (2 * level)
-        }
+    /// Idealized size of a level for spill boundaries.
+    fn level_size(level: usize) -> u32 {
+        1u32 << (2 * (level + 1))
     }
 
-    /// Spill a level to the next level.
-    ///
-    /// This:
-    /// 1. Merges curr into snap
-    /// 2. If there's a next level, merges snap into next level's curr
-    /// 3. Clears curr (sets to empty)
-    fn spill(&mut self, level: usize) -> Result<()> {
-        // For level 0, we don't merge into snap - we replace snap with curr
-        // and clear curr for new entries
-        if level == 0 {
-            // Move curr to snap (curr becomes the new snap)
-            let curr = std::mem::replace(&mut self.levels[0].curr, Bucket::empty());
+    /// Half the idealized size of a level.
+    fn level_half(level: usize) -> u32 {
+        Self::level_size(level) >> 1
+    }
 
-            // Merge old snap into level 1's curr (if not empty)
-            let old_snap = std::mem::replace(&mut self.levels[0].snap, curr);
-
-            if !old_snap.is_empty() && level + 1 < BUCKET_LIST_LEVELS {
-                let level1_curr = &self.levels[1].curr;
-                let merged = merge_buckets(level1_curr, &old_snap, true)?;
-                self.levels[1].curr = merged;
-            }
-        } else if level < BUCKET_LIST_LEVELS {
-            // For other levels:
-            // 1. Merge curr with snap to create new snap
-            let curr = &self.levels[level].curr;
-            let snap = &self.levels[level].snap;
-
-            let merged_snap = merge_buckets(snap, curr, true)?;
-
-            // 2. Old snap gets spilled to next level
-            let old_snap = std::mem::replace(&mut self.levels[level].snap, Bucket::empty());
-
-            // 3. Update this level
-            self.levels[level].curr = Bucket::empty();
-            self.levels[level].snap = merged_snap;
-
-            // 4. Spill old snap to next level (if exists)
-            if !old_snap.is_empty() && level + 1 < BUCKET_LIST_LEVELS {
-                let next_level_curr = &self.levels[level + 1].curr;
-                let merged = merge_buckets(next_level_curr, &old_snap, true)?;
-                self.levels[level + 1].curr = merged;
-            }
+    /// Returns true if a level should spill at a given ledger.
+    fn level_should_spill(ledger_seq: u32, level: usize) -> bool {
+        if level == BUCKET_LIST_LEVELS - 1 {
+            return false;
         }
 
-        Ok(())
+        let half = Self::level_half(level);
+        let size = Self::level_size(level);
+        ledger_seq == Self::round_down(ledger_seq, half)
+            || ledger_seq == Self::round_down(ledger_seq, size)
+    }
+
+    fn should_merge_with_empty_curr(ledger_seq: u32, level: usize) -> bool {
+        if level == 0 {
+            return false;
+        }
+
+        let merge_start = Self::round_down(ledger_seq, Self::level_half(level - 1));
+        let next_change = merge_start + Self::level_half(level - 1);
+        Self::level_should_spill(next_change, level)
+    }
+
+    fn keep_tombstone_entries(level: usize) -> bool {
+        level < BUCKET_LIST_LEVELS - 1
     }
 
     /// Get all hashes in the bucket list (for serialization).
@@ -422,6 +451,8 @@ mod tests {
     use stellar_xdr::curr::*;
     use crate::BucketEntry; // Re-import to shadow XDR's BucketEntry
 
+    const TEST_PROTOCOL: u32 = 25;
+
     fn make_account_id(bytes: [u8; 32]) -> AccountId {
         AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(bytes)))
     }
@@ -463,7 +494,8 @@ mod tests {
         let mut bl = BucketList::new();
 
         let entry = make_account_entry([1u8; 32], 100);
-        bl.add_batch(1, vec![entry], vec![]).unwrap();
+        bl.add_batch(1, TEST_PROTOCOL, BucketListType::Live, vec![entry], vec![], vec![])
+            .unwrap();
 
         let key = make_account_key([1u8; 32]);
         let found = bl.get(&key).unwrap().unwrap();
@@ -481,11 +513,13 @@ mod tests {
 
         // Add initial entry
         let entry1 = make_account_entry([1u8; 32], 100);
-        bl.add_batch(1, vec![entry1], vec![]).unwrap();
+        bl.add_batch(1, TEST_PROTOCOL, BucketListType::Live, vec![entry1], vec![], vec![])
+            .unwrap();
 
         // Update entry
         let entry2 = make_account_entry([1u8; 32], 200);
-        bl.add_batch(2, vec![entry2], vec![]).unwrap();
+        bl.add_batch(2, TEST_PROTOCOL, BucketListType::Live, vec![], vec![entry2], vec![])
+            .unwrap();
 
         let key = make_account_key([1u8; 32]);
         let found = bl.get(&key).unwrap().unwrap();
@@ -503,11 +537,20 @@ mod tests {
 
         // Add entry
         let entry = make_account_entry([1u8; 32], 100);
-        bl.add_batch(1, vec![entry], vec![]).unwrap();
+        bl.add_batch(1, TEST_PROTOCOL, BucketListType::Live, vec![entry], vec![], vec![])
+            .unwrap();
 
         // Delete entry
         let key = make_account_key([1u8; 32]);
-        bl.add_batch(2, vec![], vec![key.clone()]).unwrap();
+        bl.add_batch(
+            2,
+            TEST_PROTOCOL,
+            BucketListType::Live,
+            vec![],
+            vec![],
+            vec![key.clone()],
+        )
+        .unwrap();
 
         // Should not be found
         let found = bl.get(&key).unwrap();
@@ -515,13 +558,15 @@ mod tests {
     }
 
     #[test]
-    fn test_spill_periods() {
-        assert_eq!(BucketList::spill_period(0), 1);
-        assert_eq!(BucketList::spill_period(1), 4);
-        assert_eq!(BucketList::spill_period(2), 16);
-        assert_eq!(BucketList::spill_period(3), 64);
-        assert_eq!(BucketList::spill_period(4), 256);
-        assert_eq!(BucketList::spill_period(5), 1024);
+    fn test_level_sizes() {
+        assert_eq!(BucketList::level_size(0), 4);
+        assert_eq!(BucketList::level_size(1), 16);
+        assert_eq!(BucketList::level_size(2), 64);
+        assert_eq!(BucketList::level_size(3), 256);
+        assert_eq!(BucketList::level_half(0), 2);
+        assert_eq!(BucketList::level_half(1), 8);
+        assert_eq!(BucketList::level_half(2), 32);
+        assert_eq!(BucketList::level_half(3), 128);
     }
 
     #[test]
@@ -530,7 +575,8 @@ mod tests {
         let hash1 = bl.hash();
 
         let entry = make_account_entry([1u8; 32], 100);
-        bl.add_batch(1, vec![entry], vec![]).unwrap();
+        bl.add_batch(1, TEST_PROTOCOL, BucketListType::Live, vec![entry], vec![], vec![])
+            .unwrap();
         let hash2 = bl.hash();
 
         assert_ne!(hash1, hash2);
@@ -544,7 +590,8 @@ mod tests {
         assert!(!bl.contains(&key).unwrap());
 
         let entry = make_account_entry([1u8; 32], 100);
-        bl.add_batch(1, vec![entry], vec![]).unwrap();
+        bl.add_batch(1, TEST_PROTOCOL, BucketListType::Live, vec![entry], vec![], vec![])
+            .unwrap();
 
         assert!(bl.contains(&key).unwrap());
     }
@@ -558,7 +605,15 @@ mod tests {
             let mut id = [0u8; 32];
             id[0..4].copy_from_slice(&i.to_be_bytes());
             let entry = make_account_entry(id, i as i64 * 100);
-            bl.add_batch(i, vec![entry], vec![]).unwrap();
+            bl.add_batch(
+                i,
+                TEST_PROTOCOL,
+                BucketListType::Live,
+                vec![entry],
+                vec![],
+                vec![],
+            )
+            .unwrap();
         }
 
         // Verify all entries are accessible

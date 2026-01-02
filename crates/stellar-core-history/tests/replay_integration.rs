@@ -88,7 +88,14 @@ async fn test_catchup_replay_bucket_hash_verification() {
     let checkpoint_bucket_hash = bucket_list.hash();
     let mut bucket_list_after = bucket_list.clone();
     bucket_list_after
-        .add_batch(target, Vec::new(), Vec::new())
+        .add_batch(
+            target,
+            25,
+            stellar_xdr::curr::BucketListType::Live,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
         .expect("bucket add batch");
     let replay_bucket_hash = bucket_list_after.hash();
 

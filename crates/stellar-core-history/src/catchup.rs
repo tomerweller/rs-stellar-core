@@ -35,6 +35,7 @@ use stellar_core_invariant::{
     BucketListHashMatchesHeader, CloseTimeNondecreasing, ConservationOfLumens, InvariantContext,
     InvariantManager, LastModifiedLedgerSeqMatchesHeader, LedgerEntryIsValid, LedgerSeqIncrement,
 };
+use sha2::Digest;
 use stellar_core_ledger::TransactionSetVariant;
 use stellar_core_tx::TransactionFrame;
 use stellar_xdr::curr::{
@@ -253,7 +254,7 @@ impl CatchupManager {
         } else {
             // Replay ledgers to reach target
             let final_state = self
-                .replay_ledgers(&mut bucket_list, &ledger_data, network_id)
+                .replay_ledgers(&mut bucket_list, hot_archive_bucket_list.as_ref(), &ledger_data, network_id)
                 .await?;
             let ledgers_applied = target - checkpoint_seq;
             // Get the final header from replay
@@ -418,7 +419,7 @@ impl CatchupManager {
             (checkpoint_header, header_hash, 0)
         } else {
             let final_state = self
-                .replay_ledgers(&mut bucket_list, &ledger_data, network_id)
+                .replay_ledgers(&mut bucket_list, hot_archive_bucket_list.as_ref(), &ledger_data, network_id)
                 .await?;
             let ledgers_applied = target - checkpoint_seq;
             let final_header = data
@@ -1285,6 +1286,7 @@ impl CatchupManager {
     async fn replay_ledgers(
         &mut self,
         bucket_list: &mut BucketList,
+        hot_archive_bucket_list: Option<&BucketList>,
         ledger_data: &[LedgerData],
         network_id: NetworkId,
     ) -> Result<ReplayedLedgerState> {
@@ -1319,12 +1321,23 @@ impl CatchupManager {
                 &data.header,
                 &data.tx_set,
                 bucket_list,
+                hot_archive_bucket_list,
                 &network_id,
                 &self.replay_config,
                 Some(&data.tx_results),
             )?;
             if let (Some(prev_header), Some(manager)) = (last_header.as_ref(), invariants.as_ref()) {
-                let bucket_list_hash = bucket_list.hash();
+                let bucket_list_hash = if let Some(hot_archive) = hot_archive_bucket_list {
+                    let mut hasher = sha2::Sha256::new();
+                    hasher.update(bucket_list.hash().as_bytes());
+                    hasher.update(hot_archive.hash().as_bytes());
+                    let result = hasher.finalize();
+                    let mut bytes = [0u8; 32];
+                    bytes.copy_from_slice(&result);
+                    Hash256::from_bytes(bytes)
+                } else {
+                    bucket_list.hash()
+                };
                 let ctx = InvariantContext {
                     prev_header,
                     curr_header: &data.header,

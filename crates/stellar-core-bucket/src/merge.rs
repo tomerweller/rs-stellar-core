@@ -8,11 +8,14 @@
 
 use std::cmp::Ordering;
 
-use stellar_xdr::curr::LedgerKey;
+use stellar_xdr::curr::{BucketMetadata, BucketMetadataExt, LedgerKey};
 
 use crate::bucket::Bucket;
 use crate::entry::{compare_keys, BucketEntry};
 use crate::{BucketError, Result};
+
+const FIRST_PROTOCOL_SUPPORTING_INITENTRY_AND_METAENTRY: u32 = 11;
+const FIRST_PROTOCOL_SUPPORTING_PERSISTENT_EVICTION: u32 = 23;
 
 /// Merge two buckets into a new bucket.
 ///
@@ -22,6 +25,7 @@ use crate::{BucketError, Result};
 /// * `old_bucket` - The older bucket (entries may be shadowed)
 /// * `new_bucket` - The newer bucket (entries take precedence)
 /// * `keep_dead_entries` - Whether to keep dead entries in the output
+/// * `max_protocol_version` - Maximum protocol version allowed for the merge
 ///
 /// # Merge Semantics
 /// - When keys match, the newer entry wins
@@ -32,44 +36,35 @@ pub fn merge_buckets(
     old_bucket: &Bucket,
     new_bucket: &Bucket,
     keep_dead_entries: bool,
+    max_protocol_version: u32,
 ) -> Result<Bucket> {
-    // Handle empty bucket cases
-    if old_bucket.is_empty() {
-        if new_bucket.is_empty() {
-            return Ok(Bucket::empty());
-        }
-        // Normalize init entries to live entries when merging
-        // Note: use iter() instead of entries() to support disk-backed buckets
-        let normalized: Vec<_> = new_bucket
-            .iter()
-            .filter(|e| should_keep_entry(e, keep_dead_entries))
-            .map(normalize_entry)
-            .collect();
-        return Bucket::from_entries(normalized);
-    }
-
-    if new_bucket.is_empty() {
-        return Ok(old_bucket.clone());
-    }
-
     // Get entries from both buckets (already sorted)
     // Note: use iter() instead of entries() to support disk-backed buckets
     let old_entries: Vec<BucketEntry> = old_bucket.iter().collect();
     let new_entries: Vec<BucketEntry> = new_bucket.iter().collect();
 
-    let mut merged = Vec::with_capacity(old_entries.len() + new_entries.len());
+    let old_meta = extract_metadata(&old_entries);
+    let new_meta = extract_metadata(&new_entries);
+    let (protocol_version, output_meta) =
+        build_output_metadata(old_meta.as_ref(), new_meta.as_ref(), max_protocol_version)?;
+
+    let mut merged = Vec::with_capacity(
+        old_entries.len() + new_entries.len() + output_meta.as_ref().map(|_| 1).unwrap_or(0),
+    );
+
+    if let Some(meta) = output_meta {
+        merged.push(meta);
+    }
 
     let mut old_idx = 0;
     let mut new_idx = 0;
 
-    // Skip metadata entries from old bucket, they'll be replaced by new bucket's metadata
+    // Skip metadata entries from old and new buckets; we'll insert output metadata ourselves.
     while old_idx < old_entries.len() && old_entries[old_idx].is_metadata() {
         old_idx += 1;
     }
 
-    // Copy metadata from new bucket (if any)
     while new_idx < new_entries.len() && new_entries[new_idx].is_metadata() {
-        merged.push(new_entries[new_idx].clone());
         new_idx += 1;
     }
 
@@ -109,16 +104,9 @@ pub fn merge_buckets(
                     }
                 }
             }
-            (None, Some(_)) => {
-                // Old entry has no key (metadata already handled)
-                old_idx += 1;
-            }
-            (Some(_), None) => {
-                // New entry has no key (metadata already handled)
-                new_idx += 1;
-            }
+            (None, Some(_)) => old_idx += 1,
+            (Some(_), None) => new_idx += 1,
             (None, None) => {
-                // Both metadata (already handled)
                 old_idx += 1;
                 new_idx += 1;
             }
@@ -141,6 +129,10 @@ pub fn merge_buckets(
             merged.push(normalize_entry(entry.clone()));
         }
         new_idx += 1;
+    }
+
+    if merged.is_empty() {
+        return Ok(Bucket::empty());
     }
 
     Bucket::from_entries(merged)
@@ -241,7 +233,7 @@ pub struct MergeIterator {
     old_idx: usize,
     new_idx: usize,
     keep_dead_entries: bool,
-    metadata_done: bool,
+    output_metadata: Option<BucketEntry>,
 }
 
 impl MergeIterator {
@@ -250,15 +242,27 @@ impl MergeIterator {
         old_bucket: &Bucket,
         new_bucket: &Bucket,
         keep_dead_entries: bool,
+        max_protocol_version: u32,
     ) -> Self {
         // Collect entries - works for both in-memory and disk-backed buckets
+        let old_entries: Vec<BucketEntry> = old_bucket.iter().collect();
+        let new_entries: Vec<BucketEntry> = new_bucket.iter().collect();
+        let old_meta = extract_metadata(&old_entries);
+        let new_meta = extract_metadata(&new_entries);
+        let (_, output_metadata) = build_output_metadata(
+            old_meta.as_ref(),
+            new_meta.as_ref(),
+            max_protocol_version,
+        )
+        .unwrap_or((0, None));
+
         Self {
-            old_entries: old_bucket.iter().collect(),
-            new_entries: new_bucket.iter().collect(),
+            old_entries,
+            new_entries,
             old_idx: 0,
             new_idx: 0,
             keep_dead_entries,
-            metadata_done: false,
+            output_metadata,
         }
     }
 }
@@ -267,25 +271,18 @@ impl Iterator for MergeIterator {
     type Item = BucketEntry;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // Handle metadata first
-        if !self.metadata_done {
-            // Skip old metadata
+        if let Some(meta) = self.output_metadata.take() {
             while self.old_idx < self.old_entries.len()
                 && self.old_entries[self.old_idx].is_metadata()
             {
                 self.old_idx += 1;
             }
-
-            // Return new metadata
             while self.new_idx < self.new_entries.len()
                 && self.new_entries[self.new_idx].is_metadata()
             {
-                let entry = self.new_entries[self.new_idx].clone();
                 self.new_idx += 1;
-                return Some(entry);
             }
-
-            self.metadata_done = true;
+            return Some(meta);
         }
 
         loop {
@@ -366,7 +363,11 @@ impl Iterator for MergeIterator {
 }
 
 /// Merge multiple buckets in order (first is oldest).
-pub fn merge_multiple(buckets: &[&Bucket], keep_dead_entries: bool) -> Result<Bucket> {
+pub fn merge_multiple(
+    buckets: &[&Bucket],
+    keep_dead_entries: bool,
+    max_protocol_version: u32,
+) -> Result<Bucket> {
     if buckets.is_empty() {
         return Ok(Bucket::empty());
     }
@@ -374,10 +375,76 @@ pub fn merge_multiple(buckets: &[&Bucket], keep_dead_entries: bool) -> Result<Bu
     let mut result = buckets[0].clone();
 
     for bucket in &buckets[1..] {
-        result = merge_buckets(&result, bucket, keep_dead_entries)?;
+        result = merge_buckets(&result, bucket, keep_dead_entries, max_protocol_version)?;
     }
 
     Ok(result)
+}
+
+fn extract_metadata(entries: &[BucketEntry]) -> Option<BucketMetadata> {
+    entries.iter().find_map(|entry| match entry {
+        BucketEntry::Metadata(meta) => Some(meta.clone()),
+        _ => None,
+    })
+}
+
+fn build_output_metadata(
+    old_meta: Option<&BucketMetadata>,
+    new_meta: Option<&BucketMetadata>,
+    max_protocol_version: u32,
+) -> Result<(u32, Option<BucketEntry>)> {
+    let mut protocol_version = 0u32;
+    if let Some(meta) = old_meta {
+        protocol_version = protocol_version.max(meta.ledger_version);
+    }
+    if let Some(meta) = new_meta {
+        protocol_version = protocol_version.max(meta.ledger_version);
+    }
+
+    if protocol_version == 0 {
+        protocol_version = max_protocol_version;
+    }
+
+    if max_protocol_version != 0 && protocol_version > max_protocol_version {
+        return Err(BucketError::Merge(format!(
+            "bucket protocol version {} exceeds maxProtocolVersion {}",
+            protocol_version, max_protocol_version
+        )));
+    }
+
+    let use_meta = protocol_version >= FIRST_PROTOCOL_SUPPORTING_INITENTRY_AND_METAENTRY;
+    if !use_meta {
+        return Ok((protocol_version, None));
+    }
+
+    let mut output = BucketMetadata {
+        ledger_version: protocol_version,
+        ext: BucketMetadataExt::V0,
+    };
+
+    if let Some(meta) = new_meta.filter(|meta| matches!(meta.ext, BucketMetadataExt::V1(_))) {
+        if max_protocol_version != 0
+            && max_protocol_version < FIRST_PROTOCOL_SUPPORTING_PERSISTENT_EVICTION
+        {
+            return Err(BucketError::Merge(
+                "bucket metadata ext v1 requires protocol >= 23".to_string(),
+            ));
+        }
+        output.ext = meta.ext.clone();
+    } else if let Some(meta) =
+        old_meta.filter(|meta| matches!(meta.ext, BucketMetadataExt::V1(_)))
+    {
+        if max_protocol_version != 0
+            && max_protocol_version < FIRST_PROTOCOL_SUPPORTING_PERSISTENT_EVICTION
+        {
+            return Err(BucketError::Merge(
+                "bucket metadata ext v1 requires protocol >= 23".to_string(),
+            ));
+        }
+        output.ext = meta.ext.clone();
+    }
+
+    Ok((protocol_version, Some(BucketEntry::Metadata(output))))
 }
 
 #[cfg(test)]
@@ -420,7 +487,7 @@ mod tests {
         let empty1 = Bucket::empty();
         let empty2 = Bucket::empty();
 
-        let merged = merge_buckets(&empty1, &empty2, true).unwrap();
+        let merged = merge_buckets(&empty1, &empty2, true, 0).unwrap();
         assert!(merged.is_empty());
     }
 
@@ -431,11 +498,11 @@ mod tests {
         let empty = Bucket::empty();
 
         // New is empty
-        let merged = merge_buckets(&bucket, &empty, true).unwrap();
+        let merged = merge_buckets(&bucket, &empty, true, 0).unwrap();
         assert_eq!(merged.len(), 1);
 
         // Old is empty
-        let merged = merge_buckets(&empty, &bucket, true).unwrap();
+        let merged = merge_buckets(&empty, &bucket, true, 0).unwrap();
         assert_eq!(merged.len(), 1);
     }
 
@@ -447,7 +514,7 @@ mod tests {
         let old_bucket = Bucket::from_entries(old_entries).unwrap();
         let new_bucket = Bucket::from_entries(new_entries).unwrap();
 
-        let merged = merge_buckets(&old_bucket, &new_bucket, true).unwrap();
+        let merged = merge_buckets(&old_bucket, &new_bucket, true, 0).unwrap();
         assert_eq!(merged.len(), 2);
     }
 
@@ -459,7 +526,7 @@ mod tests {
         let old_bucket = Bucket::from_entries(old_entries).unwrap();
         let new_bucket = Bucket::from_entries(new_entries).unwrap();
 
-        let merged = merge_buckets(&old_bucket, &new_bucket, true).unwrap();
+        let merged = merge_buckets(&old_bucket, &new_bucket, true, 0).unwrap();
         assert_eq!(merged.len(), 1);
 
         // Verify new entry won
@@ -481,12 +548,12 @@ mod tests {
         let new_bucket = Bucket::from_entries(new_entries).unwrap();
 
         // With keep_dead_entries = true
-        let merged = merge_buckets(&old_bucket, &new_bucket, true).unwrap();
+        let merged = merge_buckets(&old_bucket, &new_bucket, true, 0).unwrap();
         assert_eq!(merged.len(), 1);
         assert!(merged.entries()[0].is_dead());
 
         // With keep_dead_entries = false
-        let merged = merge_buckets(&old_bucket, &new_bucket, false).unwrap();
+        let merged = merge_buckets(&old_bucket, &new_bucket, false, 0).unwrap();
         assert_eq!(merged.len(), 0);
     }
 
@@ -495,7 +562,7 @@ mod tests {
         let entries = vec![BucketEntry::Init(make_account_entry([1u8; 32], 100))];
         let bucket = Bucket::from_entries(entries).unwrap();
 
-        let merged = merge_buckets(&Bucket::empty(), &bucket, true).unwrap();
+        let merged = merge_buckets(&Bucket::empty(), &bucket, true, 0).unwrap();
         assert_eq!(merged.len(), 1);
 
         // Init should be converted to Live
@@ -519,7 +586,7 @@ mod tests {
         let old_bucket = Bucket::from_entries(old_entries).unwrap();
         let new_bucket = Bucket::from_entries(new_entries).unwrap();
 
-        let merged = merge_buckets(&old_bucket, &new_bucket, true).unwrap();
+        let merged = merge_buckets(&old_bucket, &new_bucket, true, 0).unwrap();
 
         // Should have: Dead(1), Live(2, 250), Live(3, 300), Live(4, 400)
         assert_eq!(merged.len(), 4);
@@ -561,7 +628,7 @@ mod tests {
         let old_bucket = Bucket::from_entries(old_entries).unwrap();
         let new_bucket = Bucket::from_entries(new_entries).unwrap();
 
-        let iter = MergeIterator::new(&old_bucket, &new_bucket, true);
+        let iter = MergeIterator::new(&old_bucket, &new_bucket, true, 0);
         let merged: Vec<_> = iter.collect();
 
         assert_eq!(merged.len(), 3);
@@ -585,7 +652,7 @@ mod tests {
         .unwrap();
 
         let buckets = vec![&bucket1, &bucket2, &bucket3];
-        let merged = merge_multiple(&buckets, true).unwrap();
+        let merged = merge_multiple(&buckets, true, 0).unwrap();
 
         assert_eq!(merged.len(), 1);
 
@@ -608,7 +675,7 @@ mod tests {
         let new_bucket = Bucket::from_entries(new_entries).unwrap();
 
         // Even with keep_dead_entries = true, INIT + DEAD should annihilate
-        let merged = merge_buckets(&old_bucket, &new_bucket, true).unwrap();
+        let merged = merge_buckets(&old_bucket, &new_bucket, true, 0).unwrap();
         assert_eq!(merged.len(), 0, "INIT + DEAD should produce nothing");
     }
 
@@ -621,7 +688,7 @@ mod tests {
         let old_bucket = Bucket::from_entries(old_entries).unwrap();
         let new_bucket = Bucket::from_entries(new_entries).unwrap();
 
-        let merged = merge_buckets(&old_bucket, &new_bucket, true).unwrap();
+        let merged = merge_buckets(&old_bucket, &new_bucket, true, 0).unwrap();
         assert_eq!(merged.len(), 1);
         assert!(merged.entries()[0].is_live(), "DEAD + INIT should become LIVE");
 
@@ -641,7 +708,7 @@ mod tests {
         let old_bucket = Bucket::from_entries(old_entries).unwrap();
         let new_bucket = Bucket::from_entries(new_entries).unwrap();
 
-        let merged = merge_buckets(&old_bucket, &new_bucket, true).unwrap();
+        let merged = merge_buckets(&old_bucket, &new_bucket, true, 0).unwrap();
         assert_eq!(merged.len(), 1);
 
         // Should preserve INIT status with new value
@@ -666,7 +733,7 @@ mod tests {
         let old_bucket = Bucket::from_entries(old_entries).unwrap();
         let new_bucket = Bucket::from_entries(new_entries).unwrap();
 
-        let merged = merge_buckets(&old_bucket, &new_bucket, true).unwrap();
+        let merged = merge_buckets(&old_bucket, &new_bucket, true, 0).unwrap();
         assert_eq!(merged.len(), 1);
 
         // New entry wins and becomes LIVE (via catch-all)
@@ -700,7 +767,7 @@ mod tests {
         let old_bucket = Bucket::from_entries(old_entries).unwrap();
         let new_bucket = Bucket::from_entries(new_entries).unwrap();
 
-        let merged = merge_buckets(&old_bucket, &new_bucket, true).unwrap();
+        let merged = merge_buckets(&old_bucket, &new_bucket, true, 0).unwrap();
 
         // Entry 1: INIT + DEAD = nothing (annihilated)
         let key1 = make_account_key([1u8; 32]);

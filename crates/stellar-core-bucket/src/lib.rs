@@ -19,16 +19,9 @@
 //!
 //! ## Spill Frequency
 //!
-//! - Level 0 spills every ledger
-//! - Level N spills every 2^(2N) ledgers
-//!
-//! This means:
-//! - Level 0: every 1 ledger
-//! - Level 1: every 4 ledgers
-//! - Level 2: every 16 ledgers
-//! - Level 3: every 64 ledgers
-//! - Level 4: every 256 ledgers
-//! - ...and so on
+//! Levels spill on a schedule derived from their size and half-size boundaries
+//! (see `BucketList::level_size` and `BucketList::level_half`). This matches
+//! stellar-core's `BucketListBase::levelShouldSpill` logic.
 //!
 //! ## Entry Types
 //!
@@ -49,7 +42,7 @@
 //! let mut bucket_list = BucketList::new();
 //!
 //! // Add entries from a closed ledger
-//! bucket_list.add_batch(1, live_entries, dead_entries)?;
+//! bucket_list.add_batch(1, protocol_version, BucketListType::Live, init_entries, live_entries, dead_entries)?;
 //!
 //! // Look up an entry
 //! if let Some(entry) = bucket_list.get(&key)? {
@@ -85,6 +78,8 @@ mod tests {
     use super::*;
     use stellar_xdr::curr::*;
     use crate::BucketEntry; // Re-import to shadow XDR's BucketEntry
+
+    const TEST_PROTOCOL: u32 = 25;
 
     fn make_account_id(bytes: [u8; 32]) -> AccountId {
         AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(bytes)))
@@ -149,7 +144,9 @@ mod tests {
             let mut id = [0u8; 32];
             id[0..4].copy_from_slice(&i.to_be_bytes());
             let entry = make_account_entry(id, i as i64 * 100);
-            bucket_list.add_batch(i, vec![entry], vec![]).unwrap();
+            bucket_list
+                .add_batch(i, TEST_PROTOCOL, BucketListType::Live, vec![entry], vec![], vec![])
+                .unwrap();
         }
 
         // Verify all entries are accessible
@@ -169,7 +166,14 @@ mod tests {
             id[0..4].copy_from_slice(&i.to_be_bytes());
             let entry = make_account_entry(id, i as i64 * 1000);
             bucket_list
-                .add_batch(10 + i, vec![entry], vec![])
+                .add_batch(
+                    10 + i,
+                    TEST_PROTOCOL,
+                    BucketListType::Live,
+                    vec![],
+                    vec![entry],
+                    vec![],
+                )
                 .unwrap();
         }
 
@@ -189,7 +193,16 @@ mod tests {
             let mut id = [0u8; 32];
             id[0..4].copy_from_slice(&i.to_be_bytes());
             let key = make_account_key(id);
-            bucket_list.add_batch(16 + i, vec![], vec![key]).unwrap();
+            bucket_list
+                .add_batch(
+                    10 + i,
+                    TEST_PROTOCOL,
+                    BucketListType::Live,
+                    vec![],
+                    vec![],
+                    vec![key],
+                )
+                .unwrap();
         }
 
         // Verify deletions

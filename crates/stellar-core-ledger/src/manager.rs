@@ -28,12 +28,12 @@ use stellar_core_invariant::{
     SponsorshipCountIsValid,
 };
 use stellar_xdr::curr::{
-    AccountEntry, AccountId, ConfigSettingEntry, ConfigSettingId, ConfigSettingScpTiming,
-    GeneralizedTransactionSet, Hash, LedgerCloseMeta, LedgerCloseMetaExt, LedgerCloseMetaV2,
-    LedgerEntry, LedgerEntryData, LedgerHeader, LedgerHeaderHistoryEntry, LedgerHeaderHistoryEntryExt,
-    LedgerKey, LedgerKeyConfigSetting, Limits, ScpHistoryEntry, TransactionPhase,
-    TransactionResultMetaV1, TransactionSetV1, TxSetComponent, TxSetComponentTxsMaybeDiscountedFee,
-    UpgradeEntryMeta, VecM, WriteXdr,
+    AccountEntry, AccountId, BucketListType, ConfigSettingEntry, ConfigSettingId,
+    ConfigSettingScpTiming, GeneralizedTransactionSet, Hash, LedgerCloseMeta, LedgerCloseMetaExt,
+    LedgerCloseMetaV2, LedgerEntry, LedgerEntryData, LedgerHeader, LedgerHeaderHistoryEntry,
+    LedgerHeaderHistoryEntryExt, LedgerKey, LedgerKeyConfigSetting, Limits, ScpHistoryEntry,
+    TransactionPhase, TransactionResultMetaV1, TransactionSetV1, TxSetComponent,
+    TxSetComponentTxsMaybeDiscountedFee, UpgradeEntryMeta, VecM, WriteXdr,
 };
 use tracing::{debug, info, warn};
 
@@ -827,15 +827,23 @@ impl<'a> LedgerCloseContext<'a> {
         };
         let tx_result_hash = Hash256::hash_xdr(&result_set).unwrap_or(Hash256::ZERO);
 
+        let mut upgraded_header = self.prev_header.clone();
+        self.upgrade_ctx.apply_to_header(&mut upgraded_header);
+        let protocol_version = upgraded_header.ledger_version;
+
         // Apply delta to bucket list FIRST, then compute its hash
         // This ensures the bucket_list_hash in the header matches the actual state
         let bucket_list_hash = {
             let mut bucket_list = self.manager.bucket_list.write();
+            let init_entries = self.delta.init_entries();
             let live_entries = self.delta.live_entries();
             let dead_entries = self.delta.dead_entries();
 
             bucket_list.add_batch(
                 self.close_data.ledger_seq,
+                protocol_version,
+                BucketListType::Live,
+                init_entries,
                 live_entries,
                 dead_entries,
             )?;

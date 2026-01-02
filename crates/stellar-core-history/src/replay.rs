@@ -18,15 +18,18 @@ use stellar_core_ledger::{
     LedgerDelta, LedgerError, LedgerSnapshot, SnapshotHandle, TransactionSetVariant,
 };
 use stellar_xdr::curr::{
-    LedgerEntry, LedgerHeader, LedgerKey, TransactionEnvelope, TransactionMeta, TransactionResultPair,
-    TransactionResultSet, WriteXdr,
+    BucketListType, LedgerEntry, LedgerHeader, LedgerKey, TransactionEnvelope, TransactionMeta,
+    TransactionResultPair, TransactionResultSet, WriteXdr,
 };
+use sha2::{Digest, Sha256};
 
 /// The result of replaying a single ledger.
 #[derive(Debug, Clone)]
 pub struct LedgerReplayResult {
     /// The ledger sequence that was replayed.
     pub sequence: u32,
+    /// Protocol version for this ledger.
+    pub protocol_version: u32,
     /// Hash of the ledger after replay.
     pub ledger_hash: Hash256,
     /// Number of transactions in the ledger.
@@ -37,7 +40,9 @@ pub struct LedgerReplayResult {
     pub fee_pool_delta: i64,
     /// Change in total coins during the replayed ledger.
     pub total_coins_delta: i64,
-    /// Changes to apply to the bucket list.
+    /// Init entries to apply to the bucket list.
+    pub init_entries: Vec<LedgerEntry>,
+    /// Live entries to apply to the bucket list.
     pub live_entries: Vec<LedgerEntry>,
     /// Keys to mark as dead in the bucket list.
     pub dead_entries: Vec<LedgerKey>,
@@ -64,6 +69,28 @@ impl Default for ReplayConfig {
             verify_invariants: true,
         }
     }
+}
+
+const FIRST_PROTOCOL_SUPPORTING_PERSISTENT_EVICTION: u32 = 23;
+
+fn combined_bucket_list_hash(
+    live_bucket_list: &stellar_core_bucket::BucketList,
+    hot_archive_bucket_list: Option<&stellar_core_bucket::BucketList>,
+    protocol_version: u32,
+) -> Hash256 {
+    if protocol_version >= FIRST_PROTOCOL_SUPPORTING_PERSISTENT_EVICTION {
+        if let Some(hot_archive) = hot_archive_bucket_list {
+            let mut hasher = Sha256::new();
+            hasher.update(live_bucket_list.hash().as_bytes());
+            hasher.update(hot_archive.hash().as_bytes());
+            let result = hasher.finalize();
+            let mut bytes = [0u8; 32];
+            bytes.copy_from_slice(&result);
+            return Hash256::from_bytes(bytes);
+        }
+    }
+
+    live_bucket_list.hash()
 }
 
 /// Replays a single ledger from history data.
@@ -106,7 +133,7 @@ pub fn replay_ledger(
     }
 
     // Extract ledger entry changes from transaction metadata
-    let (live_entries, dead_entries) = extract_ledger_changes(tx_metas)?;
+    let (init_entries, live_entries, dead_entries) = extract_ledger_changes(tx_metas)?;
 
     // Count transactions and operations
     let tx_count = tx_set.num_transactions() as u32;
@@ -117,11 +144,13 @@ pub fn replay_ledger(
 
     Ok(LedgerReplayResult {
         sequence: header.ledger_seq,
+        protocol_version: header.ledger_version,
         ledger_hash,
         tx_count,
         op_count,
         fee_pool_delta: 0,
         total_coins_delta: 0,
+        init_entries,
         live_entries,
         dead_entries,
         changes: Vec::new(),
@@ -133,6 +162,7 @@ pub fn replay_ledger_with_execution(
     header: &LedgerHeader,
     tx_set: &TransactionSetVariant,
     bucket_list: &mut stellar_core_bucket::BucketList,
+    hot_archive_bucket_list: Option<&stellar_core_bucket::BucketList>,
     network_id: &NetworkId,
     config: &ReplayConfig,
     expected_tx_results: Option<&[TransactionResultPair]>,
@@ -211,14 +241,26 @@ pub fn replay_ledger_with_execution(
             }
         })
         .collect::<Vec<_>>();
+    let init_entries = delta.init_entries();
     let live_entries = delta.live_entries();
     let dead_entries = delta.dead_entries();
     bucket_list
-        .add_batch(header.ledger_seq, live_entries.clone(), dead_entries.clone())
+        .add_batch(
+            header.ledger_seq,
+            header.ledger_version,
+            BucketListType::Live,
+            init_entries.clone(),
+            live_entries.clone(),
+            dead_entries.clone(),
+        )
         .map_err(HistoryError::Bucket)?;
     if config.verify_bucket_list {
         let expected = Hash256::from(header.bucket_list_hash.0);
-        let actual = bucket_list.hash();
+        let actual = combined_bucket_list_hash(
+            bucket_list,
+            hot_archive_bucket_list,
+            header.ledger_version,
+        );
         if actual != expected {
             return Err(HistoryError::VerificationFailed(format!(
                 "bucket list hash mismatch at ledger {} (expected {}, got {})",
@@ -235,11 +277,13 @@ pub fn replay_ledger_with_execution(
 
     Ok(LedgerReplayResult {
         sequence: header.ledger_seq,
+        protocol_version: header.ledger_version,
         ledger_hash,
         tx_count,
         op_count,
         fee_pool_delta,
         total_coins_delta,
+        init_entries,
         live_entries,
         dead_entries,
         changes,
@@ -318,12 +362,14 @@ fn summarize_operations(tx: &TransactionEnvelope) -> Vec<String> {
 
 /// Extract ledger entry changes from transaction metadata.
 ///
-/// Returns (live_entries, dead_entries) where:
-/// - live_entries: Entries that were created or updated
+/// Returns (init_entries, live_entries, dead_entries) where:
+/// - init_entries: Entries that were created
+/// - live_entries: Entries that were updated or restored
 /// - dead_entries: Keys of entries that were deleted
 fn extract_ledger_changes(
     tx_metas: &[TransactionMeta],
-) -> Result<(Vec<LedgerEntry>, Vec<LedgerKey>)> {
+) -> Result<(Vec<LedgerEntry>, Vec<LedgerEntry>, Vec<LedgerKey>)> {
+    let mut init_entries = Vec::new();
     let mut live_entries = Vec::new();
     let mut dead_entries = Vec::new();
 
@@ -333,78 +379,139 @@ fn extract_ledger_changes(
                 // V0: VecM<OperationMeta> - each OperationMeta has a changes field
                 for op_meta in operations.iter() {
                     for change in op_meta.changes.iter() {
-                        process_ledger_entry_change(change, &mut live_entries, &mut dead_entries);
+                        process_ledger_entry_change(
+                            change,
+                            &mut init_entries,
+                            &mut live_entries,
+                            &mut dead_entries,
+                        );
                     }
                 }
             }
             TransactionMeta::V1(v1) => {
                 // Process txChanges (before)
                 for change in v1.tx_changes.iter() {
-                    process_ledger_entry_change(change, &mut live_entries, &mut dead_entries);
+                    process_ledger_entry_change(
+                        change,
+                        &mut init_entries,
+                        &mut live_entries,
+                        &mut dead_entries,
+                    );
                 }
                 // Process operation changes
                 for op_changes in v1.operations.iter() {
                     for change in op_changes.changes.iter() {
-                        process_ledger_entry_change(change, &mut live_entries, &mut dead_entries);
+                        process_ledger_entry_change(
+                            change,
+                            &mut init_entries,
+                            &mut live_entries,
+                            &mut dead_entries,
+                        );
                     }
                 }
             }
             TransactionMeta::V2(v2) => {
                 // Process txChangesBefore
                 for change in v2.tx_changes_before.iter() {
-                    process_ledger_entry_change(change, &mut live_entries, &mut dead_entries);
+                    process_ledger_entry_change(
+                        change,
+                        &mut init_entries,
+                        &mut live_entries,
+                        &mut dead_entries,
+                    );
                 }
                 // Process operation changes
                 for op_changes in v2.operations.iter() {
                     for change in op_changes.changes.iter() {
-                        process_ledger_entry_change(change, &mut live_entries, &mut dead_entries);
+                        process_ledger_entry_change(
+                            change,
+                            &mut init_entries,
+                            &mut live_entries,
+                            &mut dead_entries,
+                        );
                     }
                 }
                 // Process txChangesAfter
                 for change in v2.tx_changes_after.iter() {
-                    process_ledger_entry_change(change, &mut live_entries, &mut dead_entries);
+                    process_ledger_entry_change(
+                        change,
+                        &mut init_entries,
+                        &mut live_entries,
+                        &mut dead_entries,
+                    );
                 }
             }
             TransactionMeta::V3(v3) => {
                 // Process txChangesBefore
                 for change in v3.tx_changes_before.iter() {
-                    process_ledger_entry_change(change, &mut live_entries, &mut dead_entries);
+                    process_ledger_entry_change(
+                        change,
+                        &mut init_entries,
+                        &mut live_entries,
+                        &mut dead_entries,
+                    );
                 }
                 // Process operation changes
                 for op_changes in v3.operations.iter() {
                     for change in op_changes.changes.iter() {
-                        process_ledger_entry_change(change, &mut live_entries, &mut dead_entries);
+                        process_ledger_entry_change(
+                            change,
+                            &mut init_entries,
+                            &mut live_entries,
+                            &mut dead_entries,
+                        );
                     }
                 }
                 // Process txChangesAfter
                 for change in v3.tx_changes_after.iter() {
-                    process_ledger_entry_change(change, &mut live_entries, &mut dead_entries);
+                    process_ledger_entry_change(
+                        change,
+                        &mut init_entries,
+                        &mut live_entries,
+                        &mut dead_entries,
+                    );
                 }
                 // Note: sorobanMeta is handled separately if needed
             }
             TransactionMeta::V4(v4) => {
                 // V4 follows the same pattern as V3
                 for change in v4.tx_changes_before.iter() {
-                    process_ledger_entry_change(change, &mut live_entries, &mut dead_entries);
+                    process_ledger_entry_change(
+                        change,
+                        &mut init_entries,
+                        &mut live_entries,
+                        &mut dead_entries,
+                    );
                 }
                 for op_changes in v4.operations.iter() {
                     for change in op_changes.changes.iter() {
-                        process_ledger_entry_change(change, &mut live_entries, &mut dead_entries);
+                        process_ledger_entry_change(
+                            change,
+                            &mut init_entries,
+                            &mut live_entries,
+                            &mut dead_entries,
+                        );
                     }
                 }
                 for change in v4.tx_changes_after.iter() {
-                    process_ledger_entry_change(change, &mut live_entries, &mut dead_entries);
+                    process_ledger_entry_change(
+                        change,
+                        &mut init_entries,
+                        &mut live_entries,
+                        &mut dead_entries,
+                    );
                 }
             }
         }
     }
 
-    Ok((live_entries, dead_entries))
+    Ok((init_entries, live_entries, dead_entries))
 }
 
 /// Process a single ledger entry change.
 fn process_ledger_entry_change(
     change: &stellar_xdr::curr::LedgerEntryChange,
+    init_entries: &mut Vec<LedgerEntry>,
     live_entries: &mut Vec<LedgerEntry>,
     dead_entries: &mut Vec<LedgerKey>,
 ) {
@@ -412,7 +519,7 @@ fn process_ledger_entry_change(
 
     match change {
         LedgerEntryChange::Created(entry) => {
-            live_entries.push(entry.clone());
+            init_entries.push(entry.clone());
         }
         LedgerEntryChange::Updated(entry) => {
             live_entries.push(entry.clone());
@@ -513,6 +620,9 @@ pub fn apply_replay_to_bucket_list(
     bucket_list
         .add_batch(
             replay_result.sequence,
+            replay_result.protocol_version,
+            BucketListType::Live,
+            replay_result.init_entries.clone(),
             replay_result.live_entries.clone(),
             replay_result.dead_entries.clone(),
         )
@@ -627,6 +737,7 @@ mod tests {
         assert_eq!(result.sequence, 100);
         assert_eq!(result.tx_count, 0);
         assert_eq!(result.op_count, 0);
+        assert!(result.init_entries.is_empty());
         assert!(result.live_entries.is_empty());
         assert!(result.dead_entries.is_empty());
     }
@@ -746,6 +857,7 @@ mod tests {
             &header,
             &tx_set,
             &mut bucket_list,
+            None,
             &NetworkId::testnet(),
             &config,
             None,
@@ -771,6 +883,7 @@ mod tests {
             &header,
             &tx_set,
             &mut bucket_list,
+            None,
             &NetworkId::testnet(),
             &config,
             None,
@@ -799,6 +912,7 @@ mod tests {
             &header,
             &tx_set,
             &mut bucket_list,
+            None,
             &NetworkId::testnet(),
             &config,
             None,

@@ -182,8 +182,13 @@ impl BucketManager {
     }
 
     /// Merge two buckets and create a new bucket.
-    pub fn merge(&self, old: &Bucket, new: &Bucket) -> Result<Arc<Bucket>> {
-        let merged = merge_buckets(old, new, true)?;
+    pub fn merge(
+        &self,
+        old: &Bucket,
+        new: &Bucket,
+        max_protocol_version: u32,
+    ) -> Result<Arc<Bucket>> {
+        let merged = merge_buckets(old, new, true, max_protocol_version)?;
 
         if merged.is_empty() {
             return Ok(Arc::new(Bucket::empty()));
@@ -210,10 +215,15 @@ impl BucketManager {
     }
 
     /// Merge two buckets asynchronously.
-    pub async fn merge_async(&self, old: &Bucket, new: &Bucket) -> Result<Arc<Bucket>> {
+    pub async fn merge_async(
+        &self,
+        old: &Bucket,
+        new: &Bucket,
+        max_protocol_version: u32,
+    ) -> Result<Arc<Bucket>> {
         // For now, just call the sync version
         // In the future, this could use tokio::task::spawn_blocking
-        self.merge(old, new)
+        self.merge(old, new, max_protocol_version)
     }
 
     /// Add a bucket to the cache.
@@ -478,7 +488,7 @@ mod tests {
         let old_bucket = Bucket::from_entries(old_entries).unwrap();
         let new_bucket = Bucket::from_entries(new_entries).unwrap();
 
-        let merged = manager.merge(&old_bucket, &new_bucket).unwrap();
+        let merged = manager.merge(&old_bucket, &new_bucket, 0).unwrap();
         assert_eq!(merged.len(), 1);
 
         let key = make_account_key([1u8; 32]);

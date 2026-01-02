@@ -305,9 +305,18 @@ impl LedgerDelta {
         self.changes.is_empty()
     }
 
-    /// Get all live entries (created or updated) for bucket list update.
+    /// Get all init entries (created) for bucket list update.
+    pub fn init_entries(&self) -> Vec<LedgerEntry> {
+        self.changes()
+            .filter(|change| change.is_created())
+            .filter_map(|change| change.current_entry().cloned())
+            .collect()
+    }
+
+    /// Get all live entries (updated) for bucket list update.
     pub fn live_entries(&self) -> Vec<LedgerEntry> {
         self.changes()
+            .filter(|change| change.is_updated())
             .filter_map(|change| change.current_entry().cloned())
             .collect()
     }
@@ -475,8 +484,8 @@ mod tests {
         delta.record_create(entry.clone()).unwrap();
         assert_eq!(delta.num_changes(), 1);
 
-        let live = delta.live_entries();
-        assert_eq!(live.len(), 1);
+        let init = delta.init_entries();
+        assert_eq!(init.len(), 1);
     }
 
     #[test]
