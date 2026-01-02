@@ -251,6 +251,14 @@ impl TransactionExecutor {
         account_id: &AccountId,
         asset: &stellar_xdr::curr::TrustLineAsset,
     ) -> Result<bool> {
+        if self
+            .state
+            .get_trustline_by_trustline_asset(account_id, asset)
+            .is_some()
+        {
+            return Ok(true);
+        }
+
         let key = stellar_xdr::curr::LedgerKey::Trustline(stellar_xdr::curr::LedgerKeyTrustLine {
             account_id: account_id.clone(),
             asset: asset.clone(),
@@ -825,6 +833,12 @@ impl TransactionExecutor {
         op: &stellar_xdr::curr::Operation,
         source_id: &AccountId,
     ) -> Result<()> {
+        let op_source = op
+            .source_account
+            .as_ref()
+            .map(stellar_core_tx::muxed_to_account_id)
+            .unwrap_or_else(|| source_id.clone());
+
         // Load operation source if different from transaction source
         if let Some(ref muxed) = op.source_account {
             let op_source = stellar_core_tx::muxed_to_account_id(muxed);
@@ -842,10 +856,19 @@ impl TransactionExecutor {
             OperationBody::Payment(op_data) => {
                 let dest = stellar_core_tx::muxed_to_account_id(&op_data.destination);
                 self.load_account(snapshot, &dest)?;
+                if let Some(tl_asset) = asset_to_trustline_asset(&op_data.asset) {
+                    self.load_trustline(snapshot, &op_source, &tl_asset)?;
+                    self.load_trustline(snapshot, &dest, &tl_asset)?;
+                }
             }
             OperationBody::AccountMerge(dest) => {
                 let dest = stellar_core_tx::muxed_to_account_id(dest);
                 self.load_account(snapshot, &dest)?;
+            }
+            OperationBody::CreateClaimableBalance(op_data) => {
+                if let Some(tl_asset) = asset_to_trustline_asset(&op_data.asset) {
+                    self.load_trustline(snapshot, &op_source, &tl_asset)?;
+                }
             }
             _ => {
                 // Other operations typically work on source account
@@ -933,6 +956,18 @@ impl TransactionExecutor {
     /// Get mutable state manager.
     pub fn state_mut(&mut self) -> &mut LedgerStateManager {
         &mut self.state
+    }
+}
+
+fn asset_to_trustline_asset(asset: &stellar_xdr::curr::Asset) -> Option<stellar_xdr::curr::TrustLineAsset> {
+    match asset {
+        stellar_xdr::curr::Asset::Native => None,
+        stellar_xdr::curr::Asset::CreditAlphanum4(a) => {
+            Some(stellar_xdr::curr::TrustLineAsset::CreditAlphanum4(a.clone()))
+        }
+        stellar_xdr::curr::Asset::CreditAlphanum12(a) => {
+            Some(stellar_xdr::curr::TrustLineAsset::CreditAlphanum12(a.clone()))
+        }
     }
 }
 

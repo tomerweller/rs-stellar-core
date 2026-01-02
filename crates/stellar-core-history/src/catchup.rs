@@ -882,12 +882,7 @@ impl CatchupManager {
 
         for seq in start..=to_ledger {
             self.progress.current_ledger = seq;
-            let checkpoint = checkpoint::latest_checkpoint_before_or_at(seq).ok_or_else(|| {
-                HistoryError::CatchupFailed(format!(
-                    "ledger {} is before first checkpoint",
-                    seq
-                ))
-            })?;
+            let checkpoint = checkpoint::checkpoint_containing(seq);
 
             if !checkpoint_cache.contains_key(&checkpoint) {
                 let downloaded = self.download_checkpoint_ledger_data(checkpoint).await?;
@@ -1326,6 +1321,7 @@ impl CatchupManager {
                 bucket_list,
                 &network_id,
                 &self.replay_config,
+                Some(&data.tx_results),
             )?;
             if let (Some(prev_header), Some(manager)) = (last_header.as_ref(), invariants.as_ref()) {
                 let bucket_list_hash = bucket_list.hash();

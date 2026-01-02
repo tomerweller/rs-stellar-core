@@ -14,7 +14,8 @@ use url::Url;
 
 use crate::archive_state::HistoryArchiveState;
 use crate::download::{
-    create_client, decompress_gzip, download_with_retries, parse_xdr_stream_auto, DownloadConfig,
+    create_client, decompress_gzip, download_with_retries, parse_record_marked_xdr_stream,
+    DownloadConfig,
     DEFAULT_TIMEOUT,
 };
 use crate::error::HistoryError;
@@ -173,7 +174,7 @@ impl HistoryArchive {
     ) -> Result<Vec<LedgerHeaderHistoryEntry>, HistoryError> {
         let path = checkpoint_path("ledger", checkpoint, "xdr.gz");
         let data = self.download_xdr_gz(&path).await?;
-        parse_xdr_stream_auto(&data)
+        parse_record_marked_xdr_stream(&data)
     }
 
     /// Download transactions for a checkpoint.
@@ -193,7 +194,7 @@ impl HistoryArchive {
     ) -> Result<Vec<TransactionHistoryEntry>, HistoryError> {
         let path = checkpoint_path("transactions", checkpoint, "xdr.gz");
         let data = self.download_xdr_gz(&path).await?;
-        parse_xdr_stream_auto(&data)
+        parse_record_marked_xdr_stream(&data)
     }
 
     /// Download transaction results for a checkpoint.
@@ -213,7 +214,7 @@ impl HistoryArchive {
     ) -> Result<Vec<TransactionHistoryResultEntry>, HistoryError> {
         let path = checkpoint_path("results", checkpoint, "xdr.gz");
         let data = self.download_xdr_gz(&path).await?;
-        parse_xdr_stream_auto(&data)
+        parse_record_marked_xdr_stream(&data)
     }
 
     /// Download SCP history for a checkpoint.
@@ -225,7 +226,7 @@ impl HistoryArchive {
     ) -> Result<Vec<ScpHistoryEntry>, HistoryError> {
         let path = checkpoint_path("scp", checkpoint, "xdr.gz");
         let data = self.download_xdr_gz(&path).await?;
-        parse_xdr_stream_auto(&data)
+        parse_record_marked_xdr_stream(&data)
     }
 
     /// Download a bucket file by hash.
