@@ -39,6 +39,23 @@ crates/stellar-core-herder/
 - Uses protocol 23+ SCP timing config.
 - Linear backoff with 30m cap for nomination/ballot timeouts.
 
+## Security: EXTERNALIZE Message Validation
+
+EXTERNALIZE messages from SCP can fast-forward a node's tracking slot, which is
+necessary for catching up to the network. However, this capability must be
+protected against malicious actors who could send fake EXTERNALIZE messages.
+
+Two security checks are applied before accepting an EXTERNALIZE fast-forward:
+
+1. **Quorum Membership**: The sender must be in our transitive quorum set.
+   This ensures we only trust nodes that are part of our configured quorum.
+
+2. **Slot Distance Limit**: The slot must be within `MAX_EXTERNALIZE_SLOT_DISTANCE`
+   (1000 ledgers, ~83 minutes) of our current tracking slot. This prevents
+   malicious nodes from making us attempt catchup to non-existent slots.
+
+These checks are implemented in `receive_scp_envelope()` in `herder.rs`.
+
 ## Tests To Port
 
 From `src/herder/test/`:

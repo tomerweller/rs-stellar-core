@@ -35,6 +35,14 @@ use crate::tx_queue::{
 pub use crate::tx_queue::TransactionSet as TxSet;
 use crate::Result;
 
+/// Maximum slot distance for accepting EXTERNALIZE messages.
+///
+/// EXTERNALIZE messages from future slots can fast-forward our tracking slot,
+/// but we need to limit this to prevent malicious nodes from making us catch up
+/// to non-existent slots. This limit (1000 ledgers, ~83 minutes at 5s/ledger)
+/// is generous enough to handle network partitions while preventing attacks.
+const MAX_EXTERNALIZE_SLOT_DISTANCE: u64 = 1000;
+
 /// Result of receiving an SCP envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvelopeState {
@@ -457,6 +465,34 @@ impl Herder {
             }
 
             if slot > current_slot {
+                // Security check 1: Validate sender is in our transitive quorum
+                // This prevents accepting EXTERNALIZE messages from nodes we don't trust
+                let sender = &envelope.statement.node_id;
+                let in_quorum = self.quorum_tracker.read().is_node_definitely_in_quorum(sender);
+                if !in_quorum {
+                    warn!(
+                        slot,
+                        current_slot,
+                        sender = ?sender,
+                        "Rejecting EXTERNALIZE from node not in quorum"
+                    );
+                    return EnvelopeState::Invalid;
+                }
+
+                // Security check 2: Reject slots that are unreasonably far in the future
+                // This prevents malicious nodes from making us catch up to non-existent slots.
+                let slot_distance = slot.saturating_sub(current_slot);
+                if slot_distance > MAX_EXTERNALIZE_SLOT_DISTANCE {
+                    warn!(
+                        slot,
+                        current_slot,
+                        slot_distance,
+                        max_distance = MAX_EXTERNALIZE_SLOT_DISTANCE,
+                        "Rejecting EXTERNALIZE for slot too far in future"
+                    );
+                    return EnvelopeState::Invalid;
+                }
+
                 // Fast-forward to this slot using the externalized value
                 info!(
                     slot,
@@ -1114,7 +1150,7 @@ mod tests {
     use super::*;
     use stellar_xdr::curr::{
         ScpStatement, ScpStatementPledges, ScpNomination, ScpBallot,
-        ScpStatementExternalize, NodeId as XdrNodeId, Uint64, Value,
+        ScpStatementExternalize, NodeId as XdrNodeId, Value,
         Signature as XdrSignature, WriteXdr, Limits,
     };
     use stellar_core_crypto::SecretKey;
@@ -1236,5 +1272,154 @@ mod tests {
         assert_eq!(stats.tracking_slot, 50);
         assert_eq!(stats.pending_transactions, 0);
         assert!(!stats.is_validator);
+    }
+
+    #[test]
+    fn test_max_externalize_slot_distance_constant() {
+        // Verify the constant is set to a reasonable value (1000 ledgers)
+        // This prevents accepting EXTERNALIZE messages for slots millions of ledgers ahead
+        assert_eq!(MAX_EXTERNALIZE_SLOT_DISTANCE, 1000);
+    }
+
+    /// Creates a signed EXTERNALIZE envelope for testing.
+    fn make_signed_externalize_envelope(slot: u64, herder: &Herder) -> ScpEnvelope {
+        let secret = SecretKey::from_seed(&[1u8; 32]);
+        let public = secret.public_key();
+
+        let node_id = XdrNodeId(stellar_xdr::curr::PublicKey::PublicKeyTypeEd25519(
+            stellar_xdr::curr::Uint256(*public.as_bytes()),
+        ));
+
+        // Create a minimal valid StellarValue for the externalized value
+        let stellar_value = stellar_xdr::curr::StellarValue {
+            tx_set_hash: stellar_xdr::curr::Hash([0u8; 32]),
+            close_time: stellar_xdr::curr::TimePoint(1234567890),
+            upgrades: vec![].try_into().unwrap(),
+            ext: stellar_xdr::curr::StellarValueExt::Basic,
+        };
+        let value_bytes = stellar_value.to_xdr(Limits::none()).unwrap();
+
+        let statement = ScpStatement {
+            node_id: node_id.clone(),
+            slot_index: slot,
+            pledges: ScpStatementPledges::Externalize(ScpStatementExternalize {
+                commit: ScpBallot {
+                    counter: 1,
+                    value: Value(value_bytes.try_into().unwrap()),
+                },
+                n_h: 1,
+                commit_quorum_set_hash: stellar_xdr::curr::Hash([0u8; 32]),
+            }),
+        };
+
+        // Sign the statement
+        let statement_bytes = statement.to_xdr(Limits::none()).unwrap();
+        let mut data = herder.scp_driver.network_id().0.to_vec();
+        data.extend_from_slice(&1i32.to_be_bytes()); // ENVELOPE_TYPE_SCP = 1
+        data.extend_from_slice(&statement_bytes);
+
+        let signature = secret.sign(&data);
+        let sig_bytes: Vec<u8> = signature.as_bytes().to_vec();
+
+        ScpEnvelope {
+            statement,
+            signature: XdrSignature(sig_bytes.try_into().unwrap()),
+        }
+    }
+
+    #[test]
+    fn test_externalize_rejected_when_node_not_in_quorum() {
+        let herder = make_test_herder();
+        herder.start_syncing();
+        herder.bootstrap(100);
+
+        // Create an EXTERNALIZE envelope from a node that is NOT in our quorum
+        // (the test herder has no quorum set configured, so no nodes are in quorum)
+        let envelope = make_signed_externalize_envelope(105, &herder);
+
+        let result = herder.receive_scp_envelope(envelope);
+
+        // Should be rejected because sender is not in our transitive quorum
+        assert_eq!(result, EnvelopeState::Invalid);
+    }
+
+    #[test]
+    fn test_externalize_rejected_when_slot_too_far_in_future() {
+        // Create a herder with a quorum set that includes our test node
+        let secret = SecretKey::from_seed(&[1u8; 32]);
+        let public = secret.public_key();
+        let test_node_id = node_id_from_public_key(&public);
+
+        let quorum_set = ScpQuorumSet {
+            threshold: 1,
+            validators: vec![test_node_id.clone()].try_into().unwrap(),
+            inner_sets: vec![].try_into().unwrap(),
+        };
+
+        let config = HerderConfig {
+            local_quorum_set: Some(quorum_set),
+            ..HerderConfig::default()
+        };
+        let herder = Herder::new(config);
+        herder.start_syncing();
+        herder.bootstrap(100);
+
+        // Add the test node to the quorum tracker
+        let test_qs = ScpQuorumSet {
+            threshold: 1,
+            validators: vec![test_node_id.clone()].try_into().unwrap(),
+            inner_sets: vec![].try_into().unwrap(),
+        };
+        herder.quorum_tracker.write().expand(&test_node_id, test_qs);
+
+        // Create an EXTERNALIZE envelope for a slot WAY in the future (beyond MAX_EXTERNALIZE_SLOT_DISTANCE)
+        let far_future_slot = 100 + MAX_EXTERNALIZE_SLOT_DISTANCE + 100; // 1200
+        let envelope = make_signed_externalize_envelope(far_future_slot, &herder);
+
+        let result = herder.receive_scp_envelope(envelope);
+
+        // Should be rejected because slot is too far in the future
+        assert_eq!(result, EnvelopeState::Invalid);
+    }
+
+    #[test]
+    fn test_externalize_accepted_when_within_distance_and_in_quorum() {
+        // Create a herder with a quorum set that includes our test node
+        let secret = SecretKey::from_seed(&[1u8; 32]);
+        let public = secret.public_key();
+        let test_node_id = node_id_from_public_key(&public);
+
+        let quorum_set = ScpQuorumSet {
+            threshold: 1,
+            validators: vec![test_node_id.clone()].try_into().unwrap(),
+            inner_sets: vec![].try_into().unwrap(),
+        };
+
+        let config = HerderConfig {
+            local_quorum_set: Some(quorum_set),
+            ..HerderConfig::default()
+        };
+        let herder = Herder::new(config);
+        herder.start_syncing();
+        herder.bootstrap(100);
+
+        // Add the test node to the quorum tracker
+        let test_qs = ScpQuorumSet {
+            threshold: 1,
+            validators: vec![test_node_id.clone()].try_into().unwrap(),
+            inner_sets: vec![].try_into().unwrap(),
+        };
+        herder.quorum_tracker.write().expand(&test_node_id, test_qs);
+
+        // Create an EXTERNALIZE envelope for a slot within acceptable distance
+        let acceptable_slot = 100 + 50; // 150, well within MAX_EXTERNALIZE_SLOT_DISTANCE
+        let envelope = make_signed_externalize_envelope(acceptable_slot, &herder);
+
+        let result = herder.receive_scp_envelope(envelope);
+
+        // Should be accepted and cause fast-forward
+        assert_eq!(result, EnvelopeState::Valid);
+        // Tracking slot should have advanced (to slot + 1, since EXTERNALIZE completes that slot)
+        assert_eq!(herder.tracking_slot(), acceptable_slot + 1);
     }
 }
