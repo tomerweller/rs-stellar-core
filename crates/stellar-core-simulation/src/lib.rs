@@ -1,6 +1,6 @@
 //! Simulation harness for rs-stellar-core.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use stellar_core_crypto::SecretKey;
 use stellar_core_overlay::{LocalNode, OverlayConfig, OverlayManager, PeerAddress};
 use stellar_xdr::curr::{
@@ -19,7 +19,7 @@ impl OverlaySimulation {
         let mut peer_addrs = Vec::new();
 
         for _ in 0..node_count {
-            let port = allocate_port();
+            let port = allocate_port()?;
             let secret = SecretKey::generate();
             let local = LocalNode::new_testnet(secret);
 
@@ -80,8 +80,14 @@ impl OverlaySimulation {
     }
 }
 
-fn allocate_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    addr.port()
+fn allocate_port() -> Result<u16> {
+    let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err(anyhow!("tcp bind not permitted in this environment"));
+        }
+        Err(err) => return Err(err.into()),
+    };
+    let addr = listener.local_addr()?;
+    Ok(addr.port())
 }

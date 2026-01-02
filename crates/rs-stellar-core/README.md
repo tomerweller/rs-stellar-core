@@ -7,9 +7,7 @@ Main binary for rs-stellar-core - a pure Rust implementation of Stellar Core.
 This crate provides:
 
 - Command-line interface (CLI) for all node operations
-- HTTP status server for monitoring and transaction submission
-- Application orchestration and lifecycle management
-- Configuration parsing and management
+- Thin wrapper around `stellar-core-app` for runtime orchestration
 
 ## CLI Usage
 

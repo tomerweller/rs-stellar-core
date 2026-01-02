@@ -1,18 +1,17 @@
 [package]
-name = "rs-stellar-core"
-description = "Pure Rust implementation of Stellar Core"
+name = "stellar-core-app"
+description = "Application orchestration for rs-stellar-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-[[bin]]
-name = "rs-stellar-core"
-path = "src/main.rs"
+[lib]
+name = "stellar_core_app"
+path = "src/lib.rs"
 
 [dependencies]
 # Workspace crates
-stellar-core-app.workspace = true
 stellar-core-common.workspace = true
 stellar-core-crypto.workspace = true
 stellar-core-db.workspace = true
@@ -29,9 +28,6 @@ stellar-core-work.workspace = true
 # Stellar XDR
 stellar-xdr.workspace = true
 
-# CLI
-clap.workspace = true
-
 # Async runtime
 tokio.workspace = true
 futures.workspace = true
@@ -45,9 +41,9 @@ tower.workspace = true
 tower-http.workspace = true
 
 # Configuration
-toml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 
 # Logging
 tracing.workspace = true

@@ -200,8 +200,8 @@ mod tests {
     use super::*;
     use rusqlite::Connection;
     use stellar_xdr::curr::{
-        GeneralizedTransactionSet, Hash, TransactionHistoryEntryExt,
-        TransactionHistoryResultEntryExt, TransactionResultSet, TransactionSet, VecM,
+        Hash, TransactionHistoryEntryExt, TransactionHistoryResultEntryExt, TransactionResultSet,
+        TransactionSet, VecM,
     };
 
     fn setup_db() -> Connection {
@@ -297,15 +297,15 @@ mod tests {
         let conn = setup_db();
         let entry = TransactionHistoryEntry {
             ledger_seq: 123,
-            tx_set: GeneralizedTransactionSet::V1(TransactionSet {
+            tx_set: TransactionSet {
                 previous_ledger_hash: Hash::default(),
                 txs: VecM::default(),
-            }),
+            },
             ext: TransactionHistoryEntryExt::V0,
         };
 
         conn.store_tx_history_entry(123, &entry).unwrap();
-        let loaded = conn.get_tx_history_entry(123).unwrap().unwrap();
+        let loaded = conn.load_tx_history_entry(123).unwrap().unwrap();
         assert_eq!(loaded.ledger_seq, 123);
         assert_eq!(loaded.tx_set, entry.tx_set);
         assert_eq!(loaded.ext, entry.ext);
@@ -323,7 +323,7 @@ mod tests {
         };
 
         conn.store_tx_result_entry(456, &entry).unwrap();
-        let loaded = conn.get_tx_result_entry(456).unwrap().unwrap();
+        let loaded = conn.load_tx_result_entry(456).unwrap().unwrap();
         assert_eq!(loaded.ledger_seq, 456);
         assert_eq!(loaded.tx_result_set, entry.tx_result_set);
         assert_eq!(loaded.ext, entry.ext);

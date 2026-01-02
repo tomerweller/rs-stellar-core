@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/rs-stellar-core",
+    "crates/stellar-core-app",
     "crates/stellar-core-common",
     "crates/stellar-core-crypto",
     "crates/stellar-core-db",
@@ -35,6 +36,7 @@ soroban-env-common = "25"
 
 # Workspace crates
 stellar-core-common = { path = "crates/stellar-core-common" }
+stellar-core-app = { path = "crates/stellar-core-app" }
 stellar-core-crypto = { path = "crates/stellar-core-crypto" }
 stellar-core-db = { path = "crates/stellar-core-db" }
 stellar-core-bucket = { path = "crates/stellar-core-bucket" }

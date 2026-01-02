@@ -19,24 +19,26 @@
 //! Configuration can be provided via a TOML file or environment variables.
 //! See `rs-stellar-core --help` for more details.
 
-mod app;
-mod catchup_cmd;
-mod config;
-mod logging;
 mod quorum_intersection;
-mod run_cmd;
-mod survey;
 
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use stellar_xdr::curr::WriteXdr;
 
-use crate::app::App;
-use crate::catchup_cmd::{CatchupMode as CatchupModeInternal, CatchupOptions};
-use crate::config::AppConfig;
-use crate::logging::{LogConfig, LogFormat};
-use crate::run_cmd::{RunMode, RunOptions};
+use stellar_core_app::{
+    App,
+    AppConfig,
+    CatchupMode as CatchupModeInternal,
+    CatchupOptions,
+    LogConfig,
+    LogFormat,
+    RunMode,
+    RunOptions,
+    run_catchup,
+    run_node,
+    logging,
+};
 
 /// Pure Rust implementation of Stellar Core
 #[derive(Parser)]
@@ -343,7 +345,7 @@ async fn cmd_run(
         ..Default::default()
     };
 
-    run_cmd::run_node(config, options).await
+    run_node(config, options).await
 }
 
 /// Catchup command handler.
@@ -368,7 +370,7 @@ async fn cmd_catchup(
         keep_temp: false,
     };
 
-    let result = catchup_cmd::run_catchup(config, options).await?;
+    let result = run_catchup(config, options).await?;
     println!("{}", result);
     Ok(())
 }

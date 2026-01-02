@@ -83,6 +83,7 @@ Each crate contains a README with subsystem documentation and upstream mapping.
 
 | rs-stellar-core crate | stellar-core directory | Description |
 |-----------------------|------------------------|-------------|
+| `stellar-core-app` | `src/main/` | Application orchestration and lifecycle |
 | `stellar-core-scp` | `src/scp/` | Stellar Consensus Protocol |
 | `stellar-core-herder` | `src/herder/` | SCP coordination, slot management |
 | `stellar-core-overlay` | `src/overlay/` | P2P networking |
@@ -156,4 +157,3 @@ archives = [
 - CAPs: https://github.com/stellar/stellar-protocol/tree/master/core
 - stellar-xdr: https://github.com/stellar/rs-stellar-xdr
 - soroban-env-host: https://github.com/stellar/rs-soroban-env
-
