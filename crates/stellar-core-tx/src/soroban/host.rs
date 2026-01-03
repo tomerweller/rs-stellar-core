@@ -12,7 +12,7 @@
 use soroban_env_host::{events::Events, HostError};
 
 use stellar_xdr::curr::{
-    AccountId, Hash, HostFunction, LedgerEntry, LedgerKey, ScVal,
+    AccountId, ContractEvent, Hash, HostFunction, LedgerEntry, LedgerKey, ScVal,
     SorobanAuthorizationEntry, SorobanTransactionData,
 };
 
@@ -27,7 +27,9 @@ pub struct SorobanExecutionResult {
     pub return_value: ScVal,
     /// Storage changes made during execution.
     pub storage_changes: Vec<StorageChange>,
-    /// Events emitted during execution.
+    /// Contract events for hash computation (Contract and System types only).
+    pub contract_events: Vec<ContractEvent>,
+    /// Events emitted during execution (for meta/diagnostics).
     pub events: Events,
     /// CPU instructions consumed.
     pub cpu_insns: u64,
@@ -98,7 +100,8 @@ fn convert_output(output: InvokeHostFunctionOutput) -> SorobanExecutionResult {
     SorobanExecutionResult {
         return_value: output.return_value,
         storage_changes,
-        events: Events::default(), // TODO: convert from encoded_contract_events
+        contract_events: output.contract_events,
+        events: Events::default(), // TODO: convert from encoded_contract_events for diagnostics
         cpu_insns: output.cpu_insns,
         mem_bytes: output.mem_bytes,
     }

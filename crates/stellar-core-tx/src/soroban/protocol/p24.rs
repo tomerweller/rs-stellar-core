@@ -17,7 +17,7 @@ use soroban_env_host::{
 };
 
 use stellar_xdr::curr::{
-    AccountId, Hash, HostFunction, LedgerEntry, LedgerEntryData,
+    AccountId, ContractEvent, ContractEventType, Hash, HostFunction, LedgerEntry, LedgerEntryData,
     LedgerEntryExt, LedgerKey, Limits, ReadXdr, ScVal,
     SorobanAuthorizationEntry, SorobanTransactionData, SorobanTransactionDataExt, WriteXdr,
 };
@@ -347,14 +347,26 @@ pub fn invoke_host_function(
         })
         .collect();
 
-    // Convert contract events
-    let contract_events = result.encoded_contract_events
-        .into_iter()
-        .map(|encoded_event| EncodedContractEvent {
-            encoded_event,
-            in_successful_call: true, // TODO: track this properly
-        })
-        .collect();
+    // Decode and filter contract events
+    // Only Contract and System events go into the success preimage hash
+    let mut contract_events = Vec::new();
+    let mut encoded_contract_events = Vec::new();
+
+    for encoded_event in result.encoded_contract_events {
+        // Store the encoded version for diagnostics
+        encoded_contract_events.push(EncodedContractEvent {
+            encoded_event: encoded_event.clone(),
+            in_successful_call: true,
+        });
+
+        // Decode and filter for hash computation
+        if let Ok(event) = ContractEvent::from_xdr(&encoded_event, Limits::none()) {
+            // Only include Contract and System events (not Diagnostic)
+            if matches!(event.type_, ContractEventType::Contract | ContractEventType::System) {
+                contract_events.push(event);
+            }
+        }
+    }
 
     let cpu_insns = budget.get_cpu_insns_consumed().unwrap_or(0);
     let mem_bytes = budget.get_mem_bytes_consumed().unwrap_or(0);
@@ -363,6 +375,7 @@ pub fn invoke_host_function(
         return_value,
         ledger_changes,
         contract_events,
+        encoded_contract_events,
         cpu_insns,
         mem_bytes,
     })

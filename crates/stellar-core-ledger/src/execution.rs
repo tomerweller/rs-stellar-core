@@ -12,7 +12,7 @@ use stellar_core_invariant::{
     OrderBookIsNotCrossed,
 };
 use stellar_core_tx::{
-    soroban::SorobanConfig,
+    soroban::{SorobanConfig, FeeConfiguration, RentFeeConfiguration},
     validation::{self, LedgerContext as ValidationContext},
     LedgerContext, LedgerStateManager, TransactionFrame, TxError,
 };
@@ -81,19 +81,47 @@ pub fn load_soroban_config(snapshot: &SnapshotHandle) -> SorobanConfig {
         })
         .unwrap_or_else(|| ContractCostParams(vec![].try_into().unwrap_or_default()));
 
-    // Load compute limits
-    let (tx_max_instructions, tx_max_memory_bytes) = load_config_setting(snapshot, ConfigSettingId::ContractComputeV0)
-        .and_then(|cs| {
-            if let ConfigSettingEntry::ContractComputeV0(compute) = cs {
-                Some((compute.tx_max_instructions as u64, compute.tx_memory_limit as u64))
-            } else {
-                None
-            }
-        })
-        .unwrap_or((100_000_000, 40 * 1024 * 1024)); // Default limits
+    // Load compute limits and instruction fee
+    let (tx_max_instructions, tx_max_memory_bytes, fee_per_instruction_increment) =
+        load_config_setting(snapshot, ConfigSettingId::ContractComputeV0)
+            .and_then(|cs| {
+                if let ConfigSettingEntry::ContractComputeV0(compute) = cs {
+                    Some((
+                        compute.tx_max_instructions as u64,
+                        compute.tx_memory_limit as u64,
+                        compute.fee_rate_per_instructions_increment,
+                    ))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or((100_000_000, 40 * 1024 * 1024, 25)); // Default limits
 
-    // Load state archival TTL settings
-    let (min_temp_entry_ttl, min_persistent_entry_ttl, max_entry_ttl) =
+    // Load ledger cost (read/write entry and byte fees)
+    let (fee_per_read_entry, fee_per_write_entry, fee_per_read_1kb, fee_per_write_1kb,
+         _persistent_rent_rate_denominator_from_cost, _temporary_rent_rate_denominator_from_cost) =
+        load_config_setting(snapshot, ConfigSettingId::ContractLedgerCostV0)
+            .and_then(|cs| {
+                if let ConfigSettingEntry::ContractLedgerCostV0(cost) = cs {
+                    // Use rent fee for low state size as base write fee
+                    let write_fee = cost.rent_fee1_kb_soroban_state_size_low;
+                    Some((
+                        cost.fee_disk_read_ledger_entry,
+                        cost.fee_write_ledger_entry,
+                        cost.fee_disk_read1_kb,
+                        write_fee,
+                        2103840i64, // Default persistent rate
+                        4607i64,    // Default temp rate
+                    ))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or((6250, 10000, 1786, 11800, 2103840, 4607));
+
+    // Load state archival TTL settings and rent rate denominators
+    let (min_temp_entry_ttl, min_persistent_entry_ttl, max_entry_ttl,
+         persistent_rent_rate_denominator, temporary_rent_rate_denominator) =
         load_config_setting(snapshot, ConfigSettingId::StateArchival)
             .and_then(|cs| {
                 if let ConfigSettingEntry::StateArchival(archival) = cs {
@@ -101,12 +129,68 @@ pub fn load_soroban_config(snapshot: &SnapshotHandle) -> SorobanConfig {
                         archival.min_temporary_ttl,
                         archival.min_persistent_ttl,
                         archival.max_entry_ttl,
+                        archival.persistent_rent_rate_denominator,
+                        archival.temp_rent_rate_denominator,
                     ))
                 } else {
                     None
                 }
             })
-            .unwrap_or((16, 120960, 6312000)); // Default TTL values
+            .unwrap_or((16, 120960, 6312000, 2103840, 4607)); // Default TTL values
+
+    // Load historical data fee
+    let fee_per_historical_1kb = load_config_setting(snapshot, ConfigSettingId::ContractHistoricalDataV0)
+        .and_then(|cs| {
+            if let ConfigSettingEntry::ContractHistoricalDataV0(hist) = cs {
+                Some(hist.fee_historical1_kb)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(16235);
+
+    // Load contract events fee
+    let fee_per_contract_event_1kb = load_config_setting(snapshot, ConfigSettingId::ContractEventsV0)
+        .and_then(|cs| {
+            if let ConfigSettingEntry::ContractEventsV0(events) = cs {
+                Some(events.fee_contract_events1_kb)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(10000);
+
+    // Load bandwidth fee
+    let fee_per_tx_size_1kb = load_config_setting(snapshot, ConfigSettingId::ContractBandwidthV0)
+        .and_then(|cs| {
+            if let ConfigSettingEntry::ContractBandwidthV0(bw) = cs {
+                Some(bw.fee_tx_size1_kb)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(1624);
+
+    // Build fee configuration
+    let fee_config = FeeConfiguration {
+        fee_per_instruction_increment,
+        fee_per_read_entry,
+        fee_per_write_entry,
+        fee_per_read_1kb,
+        fee_per_write_1kb,
+        fee_per_historical_1kb,
+        fee_per_contract_event_1kb,
+        fee_per_tx_size_1kb,
+    };
+
+    // Build rent fee configuration
+    let rent_fee_config = RentFeeConfiguration {
+        fee_per_write_1kb,
+        fee_per_rent_1kb: fee_per_write_1kb, // Simplified - actual needs bucket list size calc
+        fee_per_write_entry,
+        persistent_rent_rate_denominator,
+        temporary_rent_rate_denominator,
+    };
 
     let config = SorobanConfig {
         cpu_cost_params,
@@ -116,6 +200,8 @@ pub fn load_soroban_config(snapshot: &SnapshotHandle) -> SorobanConfig {
         min_temp_entry_ttl,
         min_persistent_entry_ttl,
         max_entry_ttl,
+        fee_config,
+        rent_fee_config,
     };
 
     // Log whether we found valid cost params
@@ -124,6 +210,8 @@ pub fn load_soroban_config(snapshot: &SnapshotHandle) -> SorobanConfig {
             cpu_cost_params_count = config.cpu_cost_params.0.len(),
             mem_cost_params_count = config.mem_cost_params.0.len(),
             tx_max_instructions = config.tx_max_instructions,
+            fee_per_instruction = config.fee_config.fee_per_instruction_increment,
+            fee_per_event_1kb = config.fee_config.fee_per_contract_event_1kb,
             "Loaded Soroban config from ledger"
         );
     } else {
@@ -959,6 +1047,67 @@ impl TransactionExecutor {
             self.state.commit();
         }
 
+        // Compute fee refund for Soroban transactions
+        let final_fee = if frame.is_soroban() && all_success {
+            if let Some(ref data) = soroban_data {
+                // Compute actual events size
+                let actual_events_size: u32 = op_events.iter()
+                    .flat_map(|events| events.iter())
+                    .map(|event| {
+                        event.to_xdr(Limits::none())
+                            .map(|bytes| bytes.len() as u32)
+                            .unwrap_or(0)
+                    })
+                    .sum();
+
+                // Get declared resources
+                let resources = &data.resources;
+                let declared_resource_fee = data.resource_fee;
+                let tx_size = frame.envelope()
+                    .to_xdr(Limits::none())
+                    .map(|bytes: Vec<u8>| bytes.len() as u32)
+                    .unwrap_or(0);
+
+                // Compute actual fee charged with refund
+                let actual_fee = self.soroban_config.compute_fee_charged(
+                    declared_resource_fee,
+                    std::cmp::min(inclusion_fee, required_fee),
+                    resources.instructions,
+                    resources.footprint.read_only.len() as u32,
+                    resources.footprint.read_write.len() as u32,
+                    resources.disk_read_bytes,
+                    resources.write_bytes,
+                    tx_size,
+                    actual_events_size,
+                );
+
+                // Apply refund to account if fee decreased
+                let refund = fee.saturating_sub(actual_fee);
+                if refund > 0 {
+                    if let Some(acc) = self.state.get_account_mut(&fee_source_id) {
+                        acc.balance += refund;
+                    }
+                    self.state.flush_modified_entries();
+                }
+
+                debug!(
+                    declared_fee = declared_resource_fee,
+                    inclusion_fee = std::cmp::min(inclusion_fee, required_fee),
+                    original_fee = fee,
+                    actual_events_size,
+                    refund,
+                    actual_fee,
+                    "Soroban fee refund computed"
+                );
+
+                actual_fee
+            } else {
+                fee
+            }
+        } else {
+            fee
+        };
+
         let tx_meta = build_transaction_meta(
             fee_changes.clone(),
             op_changes,
@@ -969,7 +1118,7 @@ impl TransactionExecutor {
 
         Ok(TransactionExecutionResult {
             success: all_success,
-            fee_charged: fee,
+            fee_charged: final_fee,
             operation_results,
             error: if all_success {
                 None

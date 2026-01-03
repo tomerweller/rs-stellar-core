@@ -4,10 +4,11 @@
 //! which executes Soroban smart contract functions.
 
 use stellar_xdr::curr::{
-    AccountId, ContractCodeEntry, ContractCodeEntryExt, ContractDataDurability, ContractEventType,
-    DiagnosticEvent, Hash, HostFunction, InvokeHostFunctionOp, InvokeHostFunctionResult,
-    InvokeHostFunctionResultCode, LedgerKey, LedgerKeyContractCode, LedgerKeyContractData, Limits,
-    OperationResult, OperationResultTr, ScAddress, ScVal, SorobanTransactionData, TtlEntry, WriteXdr,
+    AccountId, ContractCodeEntry, ContractCodeEntryExt, ContractDataDurability, ContractEvent,
+    ContractEventType, DiagnosticEvent, Hash, HostFunction, InvokeHostFunctionOp,
+    InvokeHostFunctionResult, InvokeHostFunctionResultCode, InvokeHostFunctionSuccessPreImage,
+    LedgerKey, LedgerKeyContractCode, LedgerKeyContractData, Limits, OperationResult,
+    OperationResultTr, ScAddress, ScVal, SorobanTransactionData, TtlEntry, VecM, WriteXdr,
 };
 
 use crate::soroban::SorobanConfig;
@@ -114,12 +115,16 @@ fn execute_contract_invocation(
             // Apply storage changes back to our state.
             apply_soroban_storage_changes(state, &result.storage_changes);
 
-            // Compute result hash from return value
-            let result_hash = compute_return_value_hash(&result.return_value);
+            // Compute result hash from success preimage (return value + events)
+            let result_hash = compute_success_preimage_hash(
+                &result.return_value,
+                &result.contract_events,
+            );
 
             tracing::info!(
                 cpu_insns = result.cpu_insns,
                 mem_bytes = result.mem_bytes,
+                events_count = result.contract_events.len(),
                 "Soroban contract executed successfully"
             );
 
@@ -211,12 +216,23 @@ fn compute_key_hash(key: &LedgerKey) -> Hash {
     Hash(hasher.finalize().into())
 }
 
-/// Compute the hash of a return value.
-fn compute_return_value_hash(value: &ScVal) -> Hash {
+/// Compute the hash of the success preimage (return value + events).
+///
+/// This matches how C++ stellar-core computes the InvokeHostFunction success result:
+/// the hash is SHA256 of the XDR-encoded InvokeHostFunctionSuccessPreImage,
+/// which contains both the return value and the contract events.
+fn compute_success_preimage_hash(return_value: &ScVal, events: &[ContractEvent]) -> Hash {
     use sha2::{Digest, Sha256};
 
+    // Build the success preimage
+    let preimage = InvokeHostFunctionSuccessPreImage {
+        return_value: return_value.clone(),
+        events: events.to_vec().try_into().unwrap_or_default(),
+    };
+
+    // Hash the XDR-encoded preimage
     let mut hasher = Sha256::new();
-    if let Ok(bytes) = value.to_xdr(Limits::none()) {
+    if let Ok(bytes) = preimage.to_xdr(Limits::none()) {
         hasher.update(&bytes);
     }
     Hash(hasher.finalize().into())

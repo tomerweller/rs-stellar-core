@@ -1,6 +1,6 @@
 //! Shared types for protocol-versioned host implementations.
 
-use stellar_xdr::curr::{Hash, LedgerEntry, LedgerKey, ScVal};
+use stellar_xdr::curr::{ContractEvent, Hash, LedgerEntry, LedgerKey, ScVal};
 
 /// Output from invoking a Soroban host function.
 #[derive(Debug, Clone)]
@@ -9,8 +9,11 @@ pub struct InvokeHostFunctionOutput {
     pub return_value: ScVal,
     /// Changes to ledger entries.
     pub ledger_changes: Vec<LedgerEntryChange>,
-    /// Events emitted during execution.
-    pub contract_events: Vec<EncodedContractEvent>,
+    /// Decoded contract events for hash computation (Contract and System types only).
+    /// These are the events that go into InvokeHostFunctionSuccessPreImage.
+    pub contract_events: Vec<ContractEvent>,
+    /// All encoded contract events (for diagnostic purposes).
+    pub encoded_contract_events: Vec<EncodedContractEvent>,
     /// CPU instructions consumed.
     pub cpu_insns: u64,
     /// Memory bytes consumed.

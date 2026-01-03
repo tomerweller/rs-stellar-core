@@ -341,6 +341,10 @@ fn log_tx_result_mismatch(
             let actual_tx_hash = Hash256::from(actual_item.transaction_hash.0).to_hex();
             let expected_code = format!("{:?}", expected_item.result.result);
             let actual_code = format!("{:?}", actual_item.result.result);
+            let expected_fee = expected_item.result.fee_charged;
+            let actual_fee = actual_item.result.fee_charged;
+            let expected_ext = format!("{:?}", expected_item.result.ext);
+            let actual_ext = format!("{:?}", actual_item.result.ext);
             let op_summaries = transactions
                 .get(idx)
                 .map(|(tx, _)| summarize_operations(tx))
@@ -350,6 +354,10 @@ fn log_tx_result_mismatch(
                 index = idx,
                 expected_tx_hash = %expected_tx_hash,
                 actual_tx_hash = %actual_tx_hash,
+                expected_fee = %expected_fee,
+                actual_fee = %actual_fee,
+                expected_ext = %expected_ext,
+                actual_ext = %actual_ext,
                 expected_code = %expected_code,
                 actual_code = %actual_code,
                 expected_hash = %expected_hash.to_hex(),
