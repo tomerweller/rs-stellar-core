@@ -4,9 +4,13 @@
 //! Each operation type has its own submodule with the specific execution logic.
 
 use stellar_xdr::curr::{
-    AccountId, ContractEvent, DiagnosticEvent, Operation, OperationBody, OperationResult,
-    SorobanTransactionData,
+    AccountId, ContractEvent, DiagnosticEvent, ExtendFootprintTtlResult, Operation, OperationBody,
+    OperationResult, OperationResultTr, RestoreFootprintResult, SorobanTransactionData, Limits,
+    WriteXdr,
 };
+use soroban_env_host::budget::Budget;
+use soroban_env_host::e2e_invoke::entry_size_for_rent;
+use soroban_env_host::fees::{compute_rent_fee, LedgerEntryRentChange};
 
 use crate::frame::muxed_to_account_id;
 use crate::soroban::SorobanConfig;
@@ -81,6 +85,10 @@ pub struct SorobanOperationMeta {
     pub diagnostic_events: Vec<DiagnosticEvent>,
     /// Return value for invoke host function (if any).
     pub return_value: Option<stellar_xdr::curr::ScVal>,
+    /// Contract events + return value size in bytes.
+    pub event_size_bytes: u32,
+    /// Rent fee charged for storage changes.
+    pub rent_fee: i64,
 }
 
 pub struct OperationExecutionResult {
@@ -102,6 +110,96 @@ impl OperationExecutionResult {
             soroban_meta: Some(meta),
         }
     }
+}
+
+struct RentSnapshot {
+    key: stellar_xdr::curr::LedgerKey,
+    is_persistent: bool,
+    is_code_entry: bool,
+    old_size_bytes: u32,
+    old_live_until: u32,
+}
+
+fn ledger_key_hash(key: &stellar_xdr::curr::LedgerKey) -> stellar_xdr::curr::Hash {
+    use sha2::{Digest, Sha256};
+    use stellar_xdr::curr::WriteXdr;
+
+    let mut hasher = Sha256::new();
+    if let Ok(bytes) = key.to_xdr(stellar_xdr::curr::Limits::none()) {
+        hasher.update(&bytes);
+    }
+    stellar_xdr::curr::Hash(hasher.finalize().into())
+}
+
+fn rent_snapshot_for_keys(
+    keys: &[stellar_xdr::curr::LedgerKey],
+    state: &LedgerStateManager,
+) -> Vec<RentSnapshot> {
+    let budget = Budget::default();
+    let mut snapshots = Vec::new();
+    for key in keys {
+        let Some(entry) = state.get_entry(key) else {
+            continue;
+        };
+        let entry_xdr = entry.to_xdr(stellar_xdr::curr::Limits::none()).unwrap_or_default();
+        let entry_size = entry_size_for_rent(&budget, &entry, entry_xdr.len() as u32)
+            .unwrap_or(entry_xdr.len() as u32);
+        let key_hash = ledger_key_hash(key);
+        let old_live_until = state
+            .get_ttl(&key_hash)
+            .map(|ttl| ttl.live_until_ledger_seq)
+            .unwrap_or(0);
+        let (is_persistent, is_code_entry) = match key {
+            stellar_xdr::curr::LedgerKey::ContractCode(_) => (true, true),
+            stellar_xdr::curr::LedgerKey::ContractData(cd) => {
+                (cd.durability == stellar_xdr::curr::ContractDataDurability::Persistent, false)
+            }
+            _ => (false, false),
+        };
+        snapshots.push(RentSnapshot {
+            key: key.clone(),
+            is_persistent,
+            is_code_entry,
+            old_size_bytes: entry_size,
+            old_live_until,
+        });
+    }
+    snapshots
+}
+
+fn rent_changes_from_snapshots(
+    snapshots: &[RentSnapshot],
+    state: &LedgerStateManager,
+) -> Vec<LedgerEntryRentChange> {
+    let budget = Budget::default();
+    let mut changes = Vec::new();
+    for snapshot in snapshots {
+        let Some(entry) = state.get_entry(&snapshot.key) else {
+            continue;
+        };
+        let entry_xdr = entry.to_xdr(stellar_xdr::curr::Limits::none()).unwrap_or_default();
+        let new_size_bytes = entry_size_for_rent(&budget, &entry, entry_xdr.len() as u32)
+            .unwrap_or(entry_xdr.len() as u32);
+        let key_hash = ledger_key_hash(&snapshot.key);
+        let new_live_until = state
+            .get_ttl(&key_hash)
+            .map(|ttl| ttl.live_until_ledger_seq)
+            .unwrap_or(snapshot.old_live_until);
+        if new_live_until <= snapshot.old_live_until
+            && new_size_bytes <= snapshot.old_size_bytes
+        {
+            continue;
+        }
+        changes.push(LedgerEntryRentChange {
+            is_persistent: snapshot.is_persistent,
+            is_code_entry: snapshot.is_code_entry,
+            old_size_bytes: snapshot.old_size_bytes,
+            new_size_bytes,
+            old_live_until_ledger: snapshot.old_live_until,
+            new_live_until_ledger: new_live_until,
+        });
+    }
+    changes
 }
 
 pub fn execute_operation(
@@ -203,26 +301,86 @@ pub fn execute_operation_with_soroban(
             )
         }
         OperationBody::ExtendFootprintTtl(op_data) => {
-            Ok(OperationExecutionResult::new(
-                extend_footprint_ttl::execute_extend_footprint_ttl(
-                    op_data,
-                    &op_source,
-                    state,
-                    context,
-                    soroban_data,
-                )?,
-            ))
+            let default_config = SorobanConfig::default();
+            let config = soroban_config.unwrap_or(&default_config);
+            let snapshots = soroban_data
+                .map(|data| {
+                    let mut keys = Vec::new();
+                    keys.extend(data.resources.footprint.read_only.iter().cloned());
+                    keys.extend(data.resources.footprint.read_write.iter().cloned());
+                    rent_snapshot_for_keys(&keys, state)
+                })
+                .unwrap_or_default();
+            let result = extend_footprint_ttl::execute_extend_footprint_ttl(
+                op_data,
+                &op_source,
+                state,
+                context,
+                soroban_data,
+            )?;
+            let mut exec = OperationExecutionResult::new(result);
+            if matches!(
+                exec.result,
+                OperationResult::OpInner(OperationResultTr::ExtendFootprintTtl(
+                    ExtendFootprintTtlResult::Success
+                ))
+            ) {
+                let rent_changes = rent_changes_from_snapshots(&snapshots, state);
+                let rent_fee = compute_rent_fee(
+                    &rent_changes,
+                    &config.rent_fee_config,
+                    context.sequence,
+                );
+                exec.soroban_meta = Some(SorobanOperationMeta {
+                    events: Vec::new(),
+                    diagnostic_events: Vec::new(),
+                    return_value: None,
+                    event_size_bytes: 0,
+                    rent_fee,
+                });
+            }
+            Ok(exec)
         }
         OperationBody::RestoreFootprint(op_data) => {
-            Ok(OperationExecutionResult::new(
-                restore_footprint::execute_restore_footprint(
-                    op_data,
-                    &op_source,
-                    state,
-                    context,
-                    soroban_data,
-                )?,
-            ))
+            let default_config = SorobanConfig::default();
+            let config = soroban_config.unwrap_or(&default_config);
+            let snapshots = soroban_data
+                .map(|data| {
+                    let mut keys = Vec::new();
+                    keys.extend(data.resources.footprint.read_only.iter().cloned());
+                    keys.extend(data.resources.footprint.read_write.iter().cloned());
+                    rent_snapshot_for_keys(&keys, state)
+                })
+                .unwrap_or_default();
+            let result = restore_footprint::execute_restore_footprint(
+                op_data,
+                &op_source,
+                state,
+                context,
+                soroban_data,
+            )?;
+            let mut exec = OperationExecutionResult::new(result);
+            if matches!(
+                exec.result,
+                OperationResult::OpInner(OperationResultTr::RestoreFootprint(
+                    RestoreFootprintResult::Success
+                ))
+            ) {
+                let rent_changes = rent_changes_from_snapshots(&snapshots, state);
+                let rent_fee = compute_rent_fee(
+                    &rent_changes,
+                    &config.rent_fee_config,
+                    context.sequence,
+                );
+                exec.soroban_meta = Some(SorobanOperationMeta {
+                    events: Vec::new(),
+                    diagnostic_events: Vec::new(),
+                    return_value: None,
+                    event_size_bytes: 0,
+                    rent_fee,
+                });
+            }
+            Ok(exec)
         }
         // DEX operations
         OperationBody::PathPaymentStrictReceive(op_data) => {

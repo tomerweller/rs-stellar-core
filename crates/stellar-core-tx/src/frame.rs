@@ -2,6 +2,7 @@
 
 use stellar_core_common::{Hash256, NetworkId, Resource};
 use stellar_core_crypto::sha256;
+use soroban_env_host::fees::TransactionResources;
 use stellar_xdr::curr::{
     AccountId, DecoratedSignature, EnvelopeType, FeeBumpTransactionInnerTx, Hash,
     InvokeHostFunctionOp, LedgerKey, Memo,
@@ -350,11 +351,7 @@ impl TransactionFrame {
 
     /// Return the resource footprint used for surge pricing and limits.
     pub fn resources(&self, use_byte_limit_in_classic: bool, ledger_version: u32) -> Resource {
-        let tx_size = self
-            .envelope
-            .to_xdr(Limits::none())
-            .map(|bytes| bytes.len() as i64)
-            .unwrap_or(0);
+        let tx_size = self.tx_size_bytes() as i64;
 
         if self.is_soroban() {
             let data = self.soroban_data();
@@ -396,6 +393,41 @@ impl TransactionFrame {
         } else {
             Resource::new(vec![self.operation_count() as i64])
         }
+    }
+
+    /// Return the transaction size in bytes (XDR encoding).
+    pub fn tx_size_bytes(&self) -> u32 {
+        self.envelope
+            .to_xdr(Limits::none())
+            .map(|bytes| bytes.len() as u32)
+            .unwrap_or(0)
+    }
+
+    /// Build Soroban transaction resources for fee computation.
+    pub fn soroban_transaction_resources(
+        &self,
+        ledger_version: u32,
+        contract_events_size_bytes: u32,
+    ) -> Option<TransactionResources> {
+        if !self.is_soroban() {
+            return None;
+        }
+        let data = self.soroban_data()?;
+        let disk_read_entries = soroban_disk_read_entries(
+            &data.resources,
+            Some(&data.ext),
+            self.is_restore_footprint_tx(),
+            ledger_version,
+        );
+        Some(TransactionResources {
+            instructions: data.resources.instructions,
+            disk_read_entries: disk_read_entries as u32,
+            write_entries: data.resources.footprint.read_write.len() as u32,
+            disk_read_bytes: data.resources.disk_read_bytes,
+            write_bytes: data.resources.write_bytes,
+            contract_events_size_bytes,
+            transaction_size_bytes: self.tx_size_bytes(),
+        })
     }
 
     /// Get the InvokeHostFunction operations (if this is a Soroban transaction).

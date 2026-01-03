@@ -59,6 +59,12 @@ pub struct ReplayConfig {
     pub verify_bucket_list: bool,
     /// Whether to enforce invariants during replay.
     pub verify_invariants: bool,
+
+    /// Whether to emit classic contract events.
+    pub emit_classic_events: bool,
+
+    /// Whether to backfill Stellar asset events pre-protocol 23.
+    pub backfill_stellar_asset_events: bool,
 }
 
 impl Default for ReplayConfig {
@@ -67,6 +73,8 @@ impl Default for ReplayConfig {
             verify_results: true,
             verify_bucket_list: true,
             verify_invariants: true,
+            emit_classic_events: false,
+            backfill_stellar_asset_events: false,
         }
     }
 }

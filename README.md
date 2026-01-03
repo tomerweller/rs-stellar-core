@@ -47,6 +47,14 @@ Generate and edit a sample config:
 ./target/release/rs-stellar-core --config my-config.toml run
 ```
 
+Classic event emission (off by default) can be enabled in the config:
+
+```toml
+[events]
+emit_classic_events = true
+backfill_stellar_asset_events = false
+```
+
 ## Repository Layout
 
 - `crates/rs-stellar-core/` — main binary

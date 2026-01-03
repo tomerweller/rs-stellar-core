@@ -51,6 +51,12 @@ pub struct LedgerManagerConfig {
 
     /// Whether to persist to database.
     pub persist_to_db: bool,
+
+    /// Whether to emit classic contract events.
+    pub emit_classic_events: bool,
+
+    /// Whether to backfill Stellar asset events pre-protocol 23.
+    pub backfill_stellar_asset_events: bool,
 }
 
 impl Default for LedgerManagerConfig {
@@ -60,6 +66,8 @@ impl Default for LedgerManagerConfig {
             validate_bucket_hash: true,
             validate_invariants: true,
             persist_to_db: true,
+            emit_classic_events: false,
+            backfill_stellar_asset_events: false,
         }
     }
 }
@@ -816,6 +824,10 @@ impl<'a> LedgerCloseContext<'a> {
             &mut self.delta,
             soroban_config,
             soroban_base_prng_seed.0,
+            stellar_core_tx::ClassicEventConfig {
+                emit_classic_events: self.manager.config.emit_classic_events,
+                backfill_stellar_asset_events: self.manager.config.backfill_stellar_asset_events,
+            },
             op_invariants,
         )?;
         self.id_pool = id_pool;

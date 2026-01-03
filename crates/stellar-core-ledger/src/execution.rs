@@ -11,23 +11,33 @@ use stellar_core_invariant::{
     LedgerEntryChange as InvariantLedgerEntryChange, LiabilitiesMatchOffers,
     OrderBookIsNotCrossed,
 };
+use soroban_env_host::fees::{
+    compute_rent_write_fee_per_1kb, compute_transaction_resource_fee, FeeConfiguration,
+    RentFeeConfiguration, RentWriteFeeConfiguration,
+};
 use stellar_core_tx::{
-    soroban::{SorobanConfig, FeeConfiguration, RentFeeConfiguration},
+    make_account_address, make_claimable_balance_address, make_muxed_account_address,
+    operations::OperationType,
+    soroban::SorobanConfig,
     validation::{self, LedgerContext as ValidationContext},
-    LedgerContext, LedgerStateManager, TransactionFrame, TxError,
+    ClassicEventConfig, LedgerContext, LedgerStateManager, OpEventManager, TransactionFrame,
+    TxError, TxEventManager,
 };
 use stellar_xdr::curr::{
-    AccountEntry, AccountId, ConfigSettingEntry, ConfigSettingId, ContractCostParams,
-    DataEntry, LedgerEntry, LedgerEntryData, LedgerEntryExt, LedgerHeader,
-    ContractEvent, DiagnosticEvent, ExtensionPoint, LedgerEntryChange, LedgerEntryChanges,
-    TransactionEvent, TransactionEventStage,
-    LedgerKey, LedgerKeyConfigSetting, OfferEntry, OperationBody, OperationMeta, OperationMetaV2,
-    OperationResult, Preconditions, SignerKey, SorobanTransactionMetaExt, SorobanTransactionMetaV2,
-    TransactionEnvelope, TransactionMeta, TransactionMetaV3, TransactionMetaV4, TransactionResult,
-    TransactionResultCode, TransactionResultExt, TransactionResultMetaV1, TransactionResultPair,
-    TransactionResultResult, TrustLineEntry, VecM, WriteXdr, Limits, InnerTransactionResult,
-    InnerTransactionResultExt,
-    InnerTransactionResultPair, InnerTransactionResultResult,
+    AccountEntry, AccountId, AccountMergeResult, AllowTrustOp, AlphaNum4, AlphaNum12, Asset,
+    AssetCode, ClaimableBalanceEntry, ConfigSettingEntry, ConfigSettingId, ContractCostParams,
+    ContractEvent, CreateClaimableBalanceResult,
+    DataEntry, DiagnosticEvent, ExtensionPoint, Hash, InflationResult, LedgerEntry,
+    LedgerEntryChange, LedgerEntryChanges, LedgerEntryData, LedgerEntryExt, LedgerHeader, LedgerKey,
+    LedgerKeyConfigSetting, LiquidityPoolEntry, LiquidityPoolEntryBody, ManageBuyOfferResult,
+    ManageSellOfferResult, MuxedAccount, OfferEntry, Operation, OperationBody, OperationMetaV2,
+    OperationResult, OperationResultTr, PathPaymentStrictReceiveResult,
+    PathPaymentStrictSendResult, Preconditions, ScAddress, SignerKey, SorobanTransactionMetaExt,
+    SorobanTransactionMetaV2, TransactionEnvelope, TransactionEvent, TransactionEventStage,
+    TransactionMeta, TransactionMetaV4, TransactionResult, TransactionResultCode,
+    TransactionResultExt, TransactionResultMetaV1, TransactionResultPair, TransactionResultResult,
+    TrustLineEntry, TrustLineFlags, VecM, WriteXdr, Limits, InnerTransactionResult,
+    InnerTransactionResultExt, InnerTransactionResultPair, InnerTransactionResultResult,
 };
 use tracing::{debug, info, warn};
 
@@ -81,7 +91,7 @@ pub fn load_soroban_config(snapshot: &SnapshotHandle) -> SorobanConfig {
         })
         .unwrap_or_else(|| ContractCostParams(vec![].try_into().unwrap_or_default()));
 
-    // Load compute limits and instruction fee
+    // Load compute limits and fee rate per instructions
     let (tx_max_instructions, tx_max_memory_bytes, fee_per_instruction_increment) =
         load_config_setting(snapshot, ConfigSettingId::ContractComputeV0)
             .and_then(|cs| {
@@ -95,51 +105,46 @@ pub fn load_soroban_config(snapshot: &SnapshotHandle) -> SorobanConfig {
                     None
                 }
             })
-            .unwrap_or((100_000_000, 40 * 1024 * 1024, 25)); // Default limits
+            .unwrap_or((100_000_000, 40 * 1024 * 1024, 0)); // Default limits
 
-    // Load ledger cost (read/write entry and byte fees)
-    let (fee_per_read_entry, fee_per_write_entry, fee_per_read_1kb, fee_per_write_1kb,
-         _persistent_rent_rate_denominator_from_cost, _temporary_rent_rate_denominator_from_cost) =
-        load_config_setting(snapshot, ConfigSettingId::ContractLedgerCostV0)
-            .and_then(|cs| {
-                if let ConfigSettingEntry::ContractLedgerCostV0(cost) = cs {
-                    // Use rent fee for low state size as base write fee
-                    let write_fee = cost.rent_fee1_kb_soroban_state_size_low;
-                    Some((
-                        cost.fee_disk_read_ledger_entry,
-                        cost.fee_write_ledger_entry,
-                        cost.fee_disk_read1_kb,
-                        write_fee,
-                        2103840i64, // Default persistent rate
-                        4607i64,    // Default temp rate
-                    ))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or((6250, 10000, 1786, 11800, 2103840, 4607));
+    // Load ledger cost settings
+    let (
+        fee_disk_read_ledger_entry,
+        fee_write_ledger_entry,
+        fee_disk_read_1kb,
+        soroban_state_target_size_bytes,
+        rent_fee_1kb_state_size_low,
+        rent_fee_1kb_state_size_high,
+        soroban_state_rent_fee_growth_factor,
+    ) = load_config_setting(snapshot, ConfigSettingId::ContractLedgerCostV0)
+        .and_then(|cs| {
+            if let ConfigSettingEntry::ContractLedgerCostV0(cost) = cs {
+                Some((
+                    cost.fee_disk_read_ledger_entry,
+                    cost.fee_write_ledger_entry,
+                    cost.fee_disk_read1_kb,
+                    cost.soroban_state_target_size_bytes,
+                    cost.rent_fee1_kb_soroban_state_size_low,
+                    cost.rent_fee1_kb_soroban_state_size_high,
+                    cost.soroban_state_rent_fee_growth_factor,
+                ))
+            } else {
+                None
+            }
+        })
+        .unwrap_or((0, 0, 0, 0, 0, 0, 0));
 
-    // Load state archival TTL settings and rent rate denominators
-    let (min_temp_entry_ttl, min_persistent_entry_ttl, max_entry_ttl,
-         persistent_rent_rate_denominator, temporary_rent_rate_denominator) =
-        load_config_setting(snapshot, ConfigSettingId::StateArchival)
-            .and_then(|cs| {
-                if let ConfigSettingEntry::StateArchival(archival) = cs {
-                    Some((
-                        archival.min_temporary_ttl,
-                        archival.min_persistent_ttl,
-                        archival.max_entry_ttl,
-                        archival.persistent_rent_rate_denominator,
-                        archival.temp_rent_rate_denominator,
-                    ))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or((16, 120960, 6312000, 2103840, 4607)); // Default TTL values
+    let fee_write_1kb = load_config_setting(snapshot, ConfigSettingId::ContractLedgerCostExtV0)
+        .and_then(|cs| {
+            if let ConfigSettingEntry::ContractLedgerCostExtV0(ext) = cs {
+                Some(ext.fee_write1_kb)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
 
-    // Load historical data fee
-    let fee_per_historical_1kb = load_config_setting(snapshot, ConfigSettingId::ContractHistoricalDataV0)
+    let fee_historical_1kb = load_config_setting(snapshot, ConfigSettingId::ContractHistoricalDataV0)
         .and_then(|cs| {
             if let ConfigSettingEntry::ContractHistoricalDataV0(hist) = cs {
                 Some(hist.fee_historical1_kb)
@@ -147,49 +152,96 @@ pub fn load_soroban_config(snapshot: &SnapshotHandle) -> SorobanConfig {
                 None
             }
         })
-        .unwrap_or(16235);
+        .unwrap_or(0);
 
-    // Load contract events fee
-    let fee_per_contract_event_1kb = load_config_setting(snapshot, ConfigSettingId::ContractEventsV0)
+    let (tx_max_contract_events_size_bytes, fee_contract_events_1kb) =
+        load_config_setting(snapshot, ConfigSettingId::ContractEventsV0)
+            .and_then(|cs| {
+                if let ConfigSettingEntry::ContractEventsV0(events) = cs {
+                    Some((events.tx_max_contract_events_size_bytes, events.fee_contract_events1_kb))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or((0, 0));
+
+    let fee_tx_size_1kb = load_config_setting(snapshot, ConfigSettingId::ContractBandwidthV0)
         .and_then(|cs| {
-            if let ConfigSettingEntry::ContractEventsV0(events) = cs {
-                Some(events.fee_contract_events1_kb)
+            if let ConfigSettingEntry::ContractBandwidthV0(bandwidth) = cs {
+                Some(bandwidth.fee_tx_size1_kb)
             } else {
                 None
             }
         })
-        .unwrap_or(10000);
+        .unwrap_or(0);
 
-    // Load bandwidth fee
-    let fee_per_tx_size_1kb = load_config_setting(snapshot, ConfigSettingId::ContractBandwidthV0)
+    // Load state archival TTL settings
+    let (
+        min_temp_entry_ttl,
+        min_persistent_entry_ttl,
+        max_entry_ttl,
+        persistent_rent_rate_denominator,
+        temp_rent_rate_denominator,
+    ) = load_config_setting(snapshot, ConfigSettingId::StateArchival)
         .and_then(|cs| {
-            if let ConfigSettingEntry::ContractBandwidthV0(bw) = cs {
-                Some(bw.fee_tx_size1_kb)
+            if let ConfigSettingEntry::StateArchival(archival) = cs {
+                Some((
+                    archival.min_temporary_ttl,
+                    archival.min_persistent_ttl,
+                    archival.max_entry_ttl,
+                    archival.persistent_rent_rate_denominator,
+                    archival.temp_rent_rate_denominator,
+                ))
             } else {
                 None
             }
         })
-        .unwrap_or(1624);
+        .unwrap_or((16, 120960, 6312000, 0, 0)); // Default TTL values
 
-    // Build fee configuration
+    let average_soroban_state_size = load_config_setting(snapshot, ConfigSettingId::LiveSorobanStateSizeWindow)
+        .and_then(|cs| {
+            if let ConfigSettingEntry::LiveSorobanStateSizeWindow(window) = cs {
+                if window.is_empty() {
+                    None
+                } else {
+                    let mut sum: u64 = 0;
+                    for size in window.iter() {
+                        sum = sum.saturating_add(*size);
+                    }
+                    Some((sum / window.len() as u64) as i64)
+                }
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+
+    let rent_write_config = RentWriteFeeConfiguration {
+        state_target_size_bytes: soroban_state_target_size_bytes,
+        rent_fee_1kb_state_size_low: rent_fee_1kb_state_size_low,
+        rent_fee_1kb_state_size_high: rent_fee_1kb_state_size_high,
+        state_size_rent_fee_growth_factor: soroban_state_rent_fee_growth_factor,
+    };
+    let fee_per_rent_1kb =
+        compute_rent_write_fee_per_1kb(average_soroban_state_size, &rent_write_config);
+
     let fee_config = FeeConfiguration {
         fee_per_instruction_increment,
-        fee_per_read_entry,
-        fee_per_write_entry,
-        fee_per_read_1kb,
-        fee_per_write_1kb,
-        fee_per_historical_1kb,
-        fee_per_contract_event_1kb,
-        fee_per_tx_size_1kb,
+        fee_per_disk_read_entry: fee_disk_read_ledger_entry,
+        fee_per_write_entry: fee_write_ledger_entry,
+        fee_per_disk_read_1kb: fee_disk_read_1kb,
+        fee_per_write_1kb: fee_write_1kb,
+        fee_per_historical_1kb: fee_historical_1kb,
+        fee_per_contract_event_1kb: fee_contract_events_1kb,
+        fee_per_transaction_size_1kb: fee_tx_size_1kb,
     };
 
-    // Build rent fee configuration
     let rent_fee_config = RentFeeConfiguration {
-        fee_per_write_1kb,
-        fee_per_rent_1kb: fee_per_write_1kb, // Simplified - actual needs bucket list size calc
-        fee_per_write_entry,
+        fee_per_write_1kb: fee_write_1kb,
+        fee_per_rent_1kb,
+        fee_per_write_entry: fee_write_ledger_entry,
         persistent_rent_rate_denominator,
-        temporary_rent_rate_denominator,
+        temporary_rent_rate_denominator: temp_rent_rate_denominator,
     };
 
     let config = SorobanConfig {
@@ -202,6 +254,7 @@ pub fn load_soroban_config(snapshot: &SnapshotHandle) -> SorobanConfig {
         max_entry_ttl,
         fee_config,
         rent_fee_config,
+        tx_max_contract_events_size_bytes,
     };
 
     // Log whether we found valid cost params
@@ -224,6 +277,65 @@ pub fn load_soroban_config(snapshot: &SnapshotHandle) -> SorobanConfig {
     config
 }
 
+struct RefundableFeeTracker {
+    max_refundable_fee: i64,
+    consumed_event_size_bytes: u32,
+    consumed_rent_fee: i64,
+    consumed_refundable_fee: i64,
+}
+
+impl RefundableFeeTracker {
+    fn new(max_refundable_fee: i64) -> Self {
+        Self {
+            max_refundable_fee,
+            consumed_event_size_bytes: 0,
+            consumed_rent_fee: 0,
+            consumed_refundable_fee: 0,
+        }
+    }
+
+    fn consume(
+        &mut self,
+        frame: &TransactionFrame,
+        protocol_version: u32,
+        config: &SorobanConfig,
+        event_size_bytes: u32,
+        rent_fee: i64,
+    ) -> bool {
+        self.consumed_event_size_bytes = self.consumed_event_size_bytes.saturating_add(event_size_bytes);
+        self.consumed_rent_fee = self.consumed_rent_fee.saturating_add(rent_fee);
+        let (_, refundable_fee) = match compute_soroban_resource_fee(
+            frame,
+            protocol_version,
+            config,
+            self.consumed_event_size_bytes,
+        ) {
+            Some(pair) => pair,
+            None => return false,
+        };
+        self.consumed_refundable_fee = self.consumed_rent_fee.saturating_add(refundable_fee);
+        self.consumed_refundable_fee <= self.max_refundable_fee
+    }
+
+    fn refund_amount(&self) -> i64 {
+        if self.max_refundable_fee > self.consumed_refundable_fee {
+            self.max_refundable_fee - self.consumed_refundable_fee
+        } else {
+            0
+        }
+    }
+}
+
+fn compute_soroban_resource_fee(
+    frame: &TransactionFrame,
+    protocol_version: u32,
+    config: &SorobanConfig,
+    event_size_bytes: u32,
+) -> Option<(i64, i64)> {
+    let resources = frame.soroban_transaction_resources(protocol_version, event_size_bytes)?;
+    Some(compute_transaction_resource_fee(&resources, &config.fee_config))
+}
+
 /// Result of executing a transaction.
 #[derive(Debug, Clone)]
 pub struct TransactionExecutionResult {
@@ -241,6 +353,8 @@ pub struct TransactionExecutionResult {
     pub tx_meta: Option<TransactionMeta>,
     /// Fee processing changes (for ledger close meta).
     pub fee_changes: Option<LedgerEntryChanges>,
+    /// Post-apply fee processing changes (refunds).
+    pub post_fee_changes: Option<LedgerEntryChanges>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -281,6 +395,8 @@ pub struct TransactionExecutor {
     loaded_accounts: HashMap<[u8; 32], bool>,
     /// Soroban network configuration for contract execution.
     soroban_config: SorobanConfig,
+    /// Classic event configuration.
+    classic_events: ClassicEventConfig,
     /// Optional operation-level invariants runner.
     op_invariants: Option<OperationInvariantRunner>,
 }
@@ -296,6 +412,7 @@ impl TransactionExecutor {
         network_id: NetworkId,
         id_pool: u64,
         soroban_config: SorobanConfig,
+        classic_events: ClassicEventConfig,
         op_invariants: Option<OperationInvariantRunner>,
     ) -> Self {
         let mut state = LedgerStateManager::new(base_reserve as i64, ledger_seq);
@@ -310,6 +427,7 @@ impl TransactionExecutor {
             state,
             loaded_accounts: HashMap::new(),
             soroban_config,
+            classic_events,
             op_invariants,
         }
     }
@@ -501,6 +619,7 @@ impl TransactionExecutor {
                 failure: Some(failure),
                 tx_meta: None,
                 fee_changes: None,
+                post_fee_changes: None,
             });
         }
 
@@ -514,6 +633,7 @@ impl TransactionExecutor {
                 failure: Some(ExecutionFailure::NoAccount),
                 tx_meta: None,
                 fee_changes: None,
+                post_fee_changes: None,
             });
         }
 
@@ -526,6 +646,7 @@ impl TransactionExecutor {
                 failure: Some(ExecutionFailure::NoAccount),
                 tx_meta: None,
                 fee_changes: None,
+                post_fee_changes: None,
             });
         }
 
@@ -541,6 +662,7 @@ impl TransactionExecutor {
                     failure: Some(ExecutionFailure::NoAccount),
                     tx_meta: None,
                     fee_changes: None,
+                post_fee_changes: None,
                 });
             }
         };
@@ -556,6 +678,7 @@ impl TransactionExecutor {
                     failure: Some(ExecutionFailure::NoAccount),
                     tx_meta: None,
                     fee_changes: None,
+                post_fee_changes: None,
                 });
             }
         };
@@ -575,6 +698,7 @@ impl TransactionExecutor {
                         failure: Some(ExecutionFailure::NoAccount),
                         tx_meta: None,
                         fee_changes: None,
+                post_fee_changes: None,
                     });
                 }
             }
@@ -592,6 +716,7 @@ impl TransactionExecutor {
                     failure: Some(ExecutionFailure::InsufficientFee),
                     tx_meta: None,
                     fee_changes: None,
+                post_fee_changes: None,
                 });
             }
             if frame.total_fee() < frame.inner_fee() as i64 {
@@ -603,6 +728,7 @@ impl TransactionExecutor {
                     failure: Some(ExecutionFailure::InsufficientFee),
                     tx_meta: None,
                     fee_changes: None,
+                post_fee_changes: None,
                 });
             }
         } else if frame.fee() < required_fee {
@@ -614,6 +740,7 @@ impl TransactionExecutor {
                 failure: Some(ExecutionFailure::InsufficientFee),
                 tx_meta: None,
                 fee_changes: None,
+                post_fee_changes: None,
             });
         }
 
@@ -639,6 +766,7 @@ impl TransactionExecutor {
                 }),
                 tx_meta: None,
                 fee_changes: None,
+                post_fee_changes: None,
             });
         }
 
@@ -662,6 +790,7 @@ impl TransactionExecutor {
                 }),
                 tx_meta: None,
                 fee_changes: None,
+                post_fee_changes: None,
             });
         }
 
@@ -676,6 +805,7 @@ impl TransactionExecutor {
                         failure: Some(ExecutionFailure::BadMinSeqAgeOrGap),
                         tx_meta: None,
                         fee_changes: None,
+                post_fee_changes: None,
                     });
                 }
             }
@@ -693,6 +823,7 @@ impl TransactionExecutor {
                             failure: Some(ExecutionFailure::BadMinSeqAgeOrGap),
                             tx_meta: None,
                             fee_changes: None,
+                post_fee_changes: None,
                         });
                     }
                 };
@@ -707,6 +838,7 @@ impl TransactionExecutor {
                         failure: Some(ExecutionFailure::BadMinSeqAgeOrGap),
                         tx_meta: None,
                         fee_changes: None,
+                post_fee_changes: None,
                     });
                 }
             }
@@ -722,6 +854,7 @@ impl TransactionExecutor {
                         failure: Some(ExecutionFailure::BadMinSeqAgeOrGap),
                         tx_meta: None,
                         fee_changes: None,
+                post_fee_changes: None,
                     });
                 }
             }
@@ -742,6 +875,7 @@ impl TransactionExecutor {
                 failure: Some(ExecutionFailure::BadSequence),
                 tx_meta: None,
                 fee_changes: None,
+                post_fee_changes: None,
             });
         }
 
@@ -755,6 +889,7 @@ impl TransactionExecutor {
                 failure: Some(ExecutionFailure::InvalidSignature),
                 tx_meta: None,
                 fee_changes: None,
+                post_fee_changes: None,
             });
         }
 
@@ -776,6 +911,7 @@ impl TransactionExecutor {
                 failure: Some(ExecutionFailure::InvalidSignature),
                 tx_meta: None,
                 fee_changes: None,
+                post_fee_changes: None,
             });
         }
 
@@ -796,6 +932,7 @@ impl TransactionExecutor {
                     failure: Some(ExecutionFailure::InvalidSignature),
                     tx_meta: None,
                     fee_changes: None,
+                post_fee_changes: None,
                 });
             }
         }
@@ -817,6 +954,7 @@ impl TransactionExecutor {
                 failure: Some(ExecutionFailure::InvalidSignature),
                 tx_meta: None,
                 fee_changes: None,
+                post_fee_changes: None,
             });
         }
 
@@ -841,6 +979,7 @@ impl TransactionExecutor {
                         failure: Some(ExecutionFailure::BadAuthExtra),
                         tx_meta: None,
                         fee_changes: None,
+                post_fee_changes: None,
                     });
                 }
             }
@@ -863,8 +1002,32 @@ impl TransactionExecutor {
                 failure: Some(ExecutionFailure::InsufficientBalance),
                 tx_meta: None,
                 fee_changes: None,
+                post_fee_changes: None,
             });
         }
+
+        let mut tx_event_manager = TxEventManager::new(
+            true,
+            self.protocol_version,
+            self.network_id.clone(),
+            self.classic_events,
+        );
+        tx_event_manager.new_fee_event(
+            &fee_source_id,
+            fee,
+            TransactionEventStage::BeforeAllTxs,
+        );
+
+        let mut refundable_fee_tracker = if frame.is_soroban() {
+            let (non_refundable_fee, _) =
+                compute_soroban_resource_fee(&frame, self.protocol_version, &self.soroban_config, 0)
+                    .unwrap_or((0, 0));
+            let declared_fee = frame.declared_soroban_resource_fee();
+            let max_refundable_fee = declared_fee.saturating_sub(non_refundable_fee);
+            Some(RefundableFeeTracker::new(max_refundable_fee))
+        } else {
+            None
+        };
 
         let delta_before_fee = delta_snapshot(&self.state);
 
@@ -876,6 +1039,7 @@ impl TransactionExecutor {
             acc.seq_num.0 += 1;
             stellar_core_tx::state::update_account_seq_info(acc, self.ledger_seq, self.close_time);
         }
+        self.state.delta_mut().add_fee(fee);
 
         self.state.flush_modified_entries();
         let delta_after_fee = delta_snapshot(&self.state);
@@ -934,17 +1098,49 @@ impl TransactionExecutor {
 
         let tx_seq = frame.sequence_number();
         for (op_index, op) in frame.operations().iter().enumerate() {
+            let op_type = OperationType::from_body(&op.body);
+            let op_source_muxed = op
+                .source_account
+                .clone()
+                .unwrap_or_else(|| frame.inner_source_account());
             let op_delta_before = delta_snapshot(&self.state);
 
             // Load any accounts needed for this operation
             self.load_operation_accounts(snapshot, op, &inner_source_id)?;
 
             // Get operation source
-            let op_source = op
-                .source_account
-                .as_ref()
-                .map(|m| stellar_core_tx::muxed_to_account_id(m))
-                .unwrap_or_else(|| inner_source_id.clone());
+            let op_source = stellar_core_tx::muxed_to_account_id(&op_source_muxed);
+
+            let pre_claimable_balance = match &op.body {
+                OperationBody::ClaimClaimableBalance(op_data) => self
+                    .state
+                    .get_claimable_balance(&op_data.balance_id)
+                    .cloned(),
+                OperationBody::ClawbackClaimableBalance(op_data) => self
+                    .state
+                    .get_claimable_balance(&op_data.balance_id)
+                    .cloned(),
+                _ => None,
+            };
+            let pre_pool = match &op.body {
+                OperationBody::LiquidityPoolDeposit(op_data) => self
+                    .state
+                    .get_liquidity_pool(&op_data.liquidity_pool_id)
+                    .cloned(),
+                OperationBody::LiquidityPoolWithdraw(op_data) => self
+                    .state
+                    .get_liquidity_pool(&op_data.liquidity_pool_id)
+                    .cloned(),
+                _ => None,
+            };
+            let mut op_event_manager = OpEventManager::new(
+                true,
+                op_type.is_soroban(),
+                self.protocol_version,
+                self.network_id.clone(),
+                frame.memo().clone(),
+                self.classic_events,
+            );
 
             // Execute the operation
             let op_index = u32::try_from(op_index).unwrap_or(u32::MAX);
@@ -961,7 +1157,22 @@ impl TransactionExecutor {
             match result {
                 Ok(op_exec) => {
                     self.state.flush_modified_entries();
-                    let op_result = op_exec.result;
+                    let mut op_result = op_exec.result;
+                    if let Some(meta) = &op_exec.soroban_meta {
+                        if let Some(tracker) = refundable_fee_tracker.as_mut() {
+                            if !tracker.consume(
+                                &frame,
+                                self.protocol_version,
+                                &self.soroban_config,
+                                meta.event_size_bytes,
+                                meta.rent_fee,
+                            ) {
+                                op_result = insufficient_refundable_fee_result(op);
+                                all_success = false;
+                                failure = Some(ExecutionFailure::OperationFailed);
+                            }
+                        }
+                    }
                     // Check if operation succeeded
                     if !is_operation_success(&op_result) {
                         all_success = false;
@@ -969,32 +1180,45 @@ impl TransactionExecutor {
                             failure = Some(ExecutionFailure::NotSupported);
                         }
                     }
-                    operation_results.push(op_result);
+                    operation_results.push(op_result.clone());
 
                     let op_delta_after = delta_snapshot(&self.state);
                     let (created, updated, deleted) =
                         delta_changes_between(self.state.delta(), op_delta_before, op_delta_after);
                     let op_changes_local = build_entry_changes(&created, &updated, &deleted);
 
+                    let mut op_events_final = Vec::new();
+                    if all_success && is_operation_success(&op_result) {
+                        if let Some(meta) = &op_exec.soroban_meta {
+                            op_event_manager.set_events(meta.events.clone());
+                            diagnostic_events.extend(meta.diagnostic_events.iter().cloned());
+                            soroban_return_value = meta.return_value.clone().or(soroban_return_value);
+                        }
+
+                        if !op_type.is_soroban() {
+                            emit_classic_events_for_operation(
+                                &mut op_event_manager,
+                                op,
+                                &op_result,
+                                &op_source_muxed,
+                                &self.state,
+                                pre_claimable_balance.as_ref(),
+                                pre_pool.as_ref(),
+                            );
+                        }
+
+                        if op_event_manager.is_enabled() {
+                            op_events_final = op_event_manager.finalize();
+                        }
+                    }
+
                     if let Some(runner) = self.op_invariants.as_mut() {
-                        let op_event_slice = op_exec
-                            .soroban_meta
-                            .as_ref()
-                            .map(|meta| meta.events.as_slice())
-                            .unwrap_or(&[]);
-                        runner.apply_and_check(&op_changes_local, op_event_slice)?;
+                        runner.apply_and_check(&op_changes_local, &op_events_final)?;
                     }
 
                     if all_success {
                         op_changes.push(op_changes_local);
-
-                        if let Some(meta) = op_exec.soroban_meta {
-                            op_events.push(meta.events.clone());
-                            diagnostic_events.extend(meta.diagnostic_events.into_iter());
-                            soroban_return_value = meta.return_value.or(soroban_return_value);
-                        } else {
-                            op_events.push(Vec::new());
-                        }
+                        op_events.push(op_events_final);
                     } else {
                         op_changes.push(empty_entry_changes());
                         op_events.push(Vec::new());
@@ -1047,82 +1271,44 @@ impl TransactionExecutor {
             self.state.commit();
         }
 
-        // Compute fee refund for Soroban transactions
-        let final_fee = if frame.is_soroban() && all_success {
-            if let Some(ref data) = soroban_data {
-                // Compute actual events size
-                let op_events_count: usize = op_events.iter().map(|v| v.len()).sum();
-                let actual_events_size: u32 = op_events.iter()
-                    .flat_map(|events| events.iter())
-                    .map(|event| {
-                        let size = event.to_xdr(Limits::none())
-                            .map(|bytes| bytes.len() as u32)
-                            .unwrap_or(0);
-                        debug!(event_type = ?event.type_, event_xdr_size = size, "Event XDR size");
-                        size
-                    })
-                    .sum();
-                debug!(op_events_len = op_events.len(), op_events_count, actual_events_size, "Events debug info");
-
-                // Get declared resources
-                let resources = &data.resources;
-                let declared_resource_fee = data.resource_fee;
-                let tx_size = frame.envelope()
-                    .to_xdr(Limits::none())
-                    .map(|bytes: Vec<u8>| bytes.len() as u32)
-                    .unwrap_or(0);
-
-                // Compute actual fee charged with refund
-                let actual_fee = self.soroban_config.compute_fee_charged(
-                    declared_resource_fee,
-                    std::cmp::min(inclusion_fee, required_fee),
-                    resources.instructions,
-                    resources.footprint.read_only.len() as u32,
-                    resources.footprint.read_write.len() as u32,
-                    resources.disk_read_bytes,
-                    resources.write_bytes,
-                    tx_size,
-                    actual_events_size,
-                );
-
-                // Apply refund to account if fee decreased
-                let refund = fee.saturating_sub(actual_fee);
-                if refund > 0 {
-                    if let Some(acc) = self.state.get_account_mut(&fee_source_id) {
-                        acc.balance += refund;
-                    }
-                    self.state.flush_modified_entries();
+        let mut post_fee_changes = empty_entry_changes();
+        let mut fee_refund = 0i64;
+        if let Some(tracker) = refundable_fee_tracker {
+            let refund = tracker.refund_amount();
+            if refund > 0 {
+                let delta_before_refund = delta_snapshot(&self.state);
+                if let Some(acc) = self.state.get_account_mut(&fee_source_id) {
+                    acc.balance += refund;
                 }
-
-                debug!(
-                    declared_fee = declared_resource_fee,
-                    inclusion_fee = std::cmp::min(inclusion_fee, required_fee),
-                    original_fee = fee,
-                    actual_events_size,
-                    refund,
-                    actual_fee,
-                    "Soroban fee refund computed"
-                );
-
-                actual_fee
-            } else {
-                fee
+                self.state.delta_mut().add_fee(-refund);
+                self.state.flush_modified_entries();
+                let delta_after_refund = delta_snapshot(&self.state);
+                let (created, updated, deleted) =
+                    delta_changes_between(self.state.delta(), delta_before_refund, delta_after_refund);
+                post_fee_changes = build_entry_changes(&created, &updated, &deleted);
             }
-        } else {
-            fee
-        };
+            let stage = if self.protocol_version >= 23 {
+                TransactionEventStage::AfterAllTxs
+            } else {
+                TransactionEventStage::AfterTx
+            };
+            tx_event_manager.new_fee_event(&fee_source_id, -refund, stage);
+            fee_refund = refund;
+        }
 
+        let tx_events = tx_event_manager.finalize();
         let tx_meta = build_transaction_meta(
             fee_changes.clone(),
             op_changes,
             op_events,
+            tx_events,
             soroban_return_value,
             diagnostic_events,
         );
 
         Ok(TransactionExecutionResult {
             success: all_success,
-            fee_charged: final_fee,
+            fee_charged: fee.saturating_sub(fee_refund),
             operation_results,
             error: if all_success {
                 None
@@ -1136,6 +1322,7 @@ impl TransactionExecutor {
             },
             tx_meta: Some(tx_meta),
             fee_changes: Some(fee_changes),
+            post_fee_changes: Some(post_fee_changes),
         })
     }
 
@@ -1311,6 +1498,272 @@ fn delta_changes_between(
     (created, updated, deleted)
 }
 
+const AUTHORIZED_FLAG: u32 = TrustLineFlags::AuthorizedFlag as u32;
+
+fn allow_trust_asset(op: &AllowTrustOp, issuer: &AccountId) -> Asset {
+    match &op.asset {
+        AssetCode::CreditAlphanum4(code) => Asset::CreditAlphanum4(AlphaNum4 {
+            asset_code: code.clone(),
+            issuer: issuer.clone(),
+        }),
+        AssetCode::CreditAlphanum12(code) => Asset::CreditAlphanum12(AlphaNum12 {
+            asset_code: code.clone(),
+            issuer: issuer.clone(),
+        }),
+    }
+}
+
+fn pool_reserves(pool: &LiquidityPoolEntry) -> Option<(Asset, Asset, i64, i64)> {
+    match &pool.body {
+        LiquidityPoolEntryBody::LiquidityPoolConstantProduct(cp) => Some((
+            cp.params.asset_a.clone(),
+            cp.params.asset_b.clone(),
+            cp.reserve_a,
+            cp.reserve_b,
+        )),
+    }
+}
+
+fn emit_classic_events_for_operation(
+    op_event_manager: &mut OpEventManager,
+    op: &Operation,
+    op_result: &OperationResult,
+    op_source: &MuxedAccount,
+    state: &LedgerStateManager,
+    pre_claimable_balance: Option<&ClaimableBalanceEntry>,
+    pre_pool: Option<&LiquidityPoolEntry>,
+) {
+    if !op_event_manager.is_enabled() {
+        return;
+    }
+
+    let source_address = make_muxed_account_address(op_source);
+    match &op.body {
+        OperationBody::CreateAccount(op_data) => {
+            op_event_manager.new_transfer_event(
+                &Asset::Native,
+                &source_address,
+                &make_account_address(&op_data.destination),
+                op_data.starting_balance,
+                true,
+            );
+        }
+        OperationBody::Payment(op_data) => {
+            op_event_manager.event_for_transfer_with_issuer_check(
+                &op_data.asset,
+                &source_address,
+                &make_muxed_account_address(&op_data.destination),
+                op_data.amount,
+                true,
+            );
+        }
+        OperationBody::PathPaymentStrictSend(op_data) => {
+            if let OperationResult::OpInner(OperationResultTr::PathPaymentStrictSend(
+                PathPaymentStrictSendResult::Success(success),
+            )) = op_result
+            {
+                op_event_manager.events_for_claim_atoms(op_source, &success.offers);
+                op_event_manager.event_for_transfer_with_issuer_check(
+                    &op_data.dest_asset,
+                    &source_address,
+                    &make_muxed_account_address(&op_data.destination),
+                    success.last.amount,
+                    true,
+                );
+            }
+        }
+        OperationBody::PathPaymentStrictReceive(op_data) => {
+            if let OperationResult::OpInner(OperationResultTr::PathPaymentStrictReceive(
+                PathPaymentStrictReceiveResult::Success(success),
+            )) = op_result
+            {
+                op_event_manager.events_for_claim_atoms(op_source, &success.offers);
+                op_event_manager.event_for_transfer_with_issuer_check(
+                    &op_data.dest_asset,
+                    &source_address,
+                    &make_muxed_account_address(&op_data.destination),
+                    op_data.dest_amount,
+                    true,
+                );
+            }
+        }
+        OperationBody::ManageSellOffer(_) | OperationBody::CreatePassiveSellOffer(_) => {
+            if let OperationResult::OpInner(tr) = op_result {
+                match tr {
+                    OperationResultTr::ManageSellOffer(ManageSellOfferResult::Success(success))
+                    | OperationResultTr::CreatePassiveSellOffer(ManageSellOfferResult::Success(
+                        success,
+                    )) => {
+                        op_event_manager.events_for_claim_atoms(op_source, &success.offers_claimed);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        OperationBody::ManageBuyOffer(_) => {
+            if let OperationResult::OpInner(OperationResultTr::ManageBuyOffer(
+                ManageBuyOfferResult::Success(success),
+            )) = op_result
+            {
+                op_event_manager.events_for_claim_atoms(op_source, &success.offers_claimed);
+            }
+        }
+        OperationBody::AccountMerge(dest) => {
+            if let OperationResult::OpInner(OperationResultTr::AccountMerge(
+                AccountMergeResult::Success(balance),
+            )) = op_result
+            {
+                op_event_manager.new_transfer_event(
+                    &Asset::Native,
+                    &source_address,
+                    &make_muxed_account_address(dest),
+                    *balance,
+                    true,
+                );
+            }
+        }
+        OperationBody::CreateClaimableBalance(op_data) => {
+            if let OperationResult::OpInner(OperationResultTr::CreateClaimableBalance(
+                CreateClaimableBalanceResult::Success(balance_id),
+            )) = op_result
+            {
+                op_event_manager.event_for_transfer_with_issuer_check(
+                    &op_data.asset,
+                    &source_address,
+                    &make_claimable_balance_address(balance_id),
+                    op_data.amount,
+                    true,
+                );
+            }
+        }
+        OperationBody::ClaimClaimableBalance(op_data) => {
+            if let Some(entry) = pre_claimable_balance {
+                op_event_manager.event_for_transfer_with_issuer_check(
+                    &entry.asset,
+                    &make_claimable_balance_address(&op_data.balance_id),
+                    &source_address,
+                    entry.amount,
+                    true,
+                );
+            }
+        }
+        OperationBody::Clawback(op_data) => {
+            op_event_manager.new_clawback_event(
+                &op_data.asset,
+                &make_muxed_account_address(&op_data.from),
+                op_data.amount,
+            );
+        }
+        OperationBody::ClawbackClaimableBalance(op_data) => {
+            if let Some(entry) = pre_claimable_balance {
+                op_event_manager.new_clawback_event(
+                    &entry.asset,
+                    &make_claimable_balance_address(&op_data.balance_id),
+                    entry.amount,
+                );
+            }
+        }
+        OperationBody::AllowTrust(op_data) => {
+            let issuer = stellar_core_tx::muxed_to_account_id(op_source);
+            let asset = allow_trust_asset(op_data, &issuer);
+            if let Some(trustline) = state.get_trustline(&op_data.trustor, &asset) {
+                let authorize = trustline.flags & AUTHORIZED_FLAG != 0;
+                op_event_manager.new_set_authorized_event(&asset, &op_data.trustor, authorize);
+            }
+        }
+        OperationBody::SetTrustLineFlags(op_data) => {
+            if let Some(trustline) = state.get_trustline(&op_data.trustor, &op_data.asset) {
+                let authorize = trustline.flags & AUTHORIZED_FLAG != 0;
+                op_event_manager.new_set_authorized_event(
+                    &op_data.asset,
+                    &op_data.trustor,
+                    authorize,
+                );
+            }
+        }
+        OperationBody::LiquidityPoolDeposit(op_data) => {
+            let (asset_a, asset_b, pre_a, pre_b) = match pre_pool.and_then(pool_reserves) {
+                Some(values) => values,
+                None => return,
+            };
+            let Some(post_pool) = state.get_liquidity_pool(&op_data.liquidity_pool_id) else {
+                return;
+            };
+            let Some((_, _, post_a, post_b)) = pool_reserves(post_pool) else {
+                return;
+            };
+            if post_a < pre_a || post_b < pre_b {
+                return;
+            }
+            let amount_a = post_a - pre_a;
+            let amount_b = post_b - pre_b;
+            let pool_address = ScAddress::LiquidityPool(op_data.liquidity_pool_id.clone());
+            op_event_manager.event_for_transfer_with_issuer_check(
+                &asset_a,
+                &source_address,
+                &pool_address,
+                amount_a,
+                false,
+            );
+            op_event_manager.event_for_transfer_with_issuer_check(
+                &asset_b,
+                &source_address,
+                &pool_address,
+                amount_b,
+                false,
+            );
+        }
+        OperationBody::LiquidityPoolWithdraw(op_data) => {
+            let (asset_a, asset_b, pre_a, pre_b) = match pre_pool.and_then(pool_reserves) {
+                Some(values) => values,
+                None => return,
+            };
+            let Some(post_pool) = state.get_liquidity_pool(&op_data.liquidity_pool_id) else {
+                return;
+            };
+            let Some((_, _, post_a, post_b)) = pool_reserves(post_pool) else {
+                return;
+            };
+            if pre_a < post_a || pre_b < post_b {
+                return;
+            }
+            let amount_a = pre_a - post_a;
+            let amount_b = pre_b - post_b;
+            let pool_address = ScAddress::LiquidityPool(op_data.liquidity_pool_id.clone());
+            op_event_manager.event_for_transfer_with_issuer_check(
+                &asset_a,
+                &pool_address,
+                &source_address,
+                amount_a,
+                true,
+            );
+            op_event_manager.event_for_transfer_with_issuer_check(
+                &asset_b,
+                &pool_address,
+                &source_address,
+                amount_b,
+                true,
+            );
+        }
+        OperationBody::Inflation => {
+            if let OperationResult::OpInner(OperationResultTr::Inflation(InflationResult::Success(
+                payouts,
+            ))) = op_result
+            {
+                for payout in payouts.iter() {
+                    op_event_manager.new_mint_event(
+                        &Asset::Native,
+                        &make_account_address(&payout.destination),
+                        payout.amount,
+                        false,
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn restore_delta_entries(
     state: &mut LedgerStateManager,
     created: &[LedgerEntry],
@@ -1455,6 +1908,7 @@ fn build_transaction_meta(
     tx_changes_before: LedgerEntryChanges,
     op_changes: Vec<LedgerEntryChanges>,
     op_events: Vec<Vec<ContractEvent>>,
+    tx_events: Vec<TransactionEvent>,
     soroban_return_value: Option<stellar_xdr::curr::ScVal>,
     diagnostic_events: Vec<DiagnosticEvent>,
 ) -> TransactionMeta {
@@ -1465,15 +1919,6 @@ fn build_transaction_meta(
             ext: ExtensionPoint::V0,
             changes,
             events: events.try_into().unwrap_or_default(),
-        })
-        .collect();
-
-    let tx_events: Vec<TransactionEvent> = operations
-        .iter()
-        .flat_map(|op_meta| op_meta.events.iter().cloned())
-        .map(|event| TransactionEvent {
-            stage: TransactionEventStage::AfterTx,
-            event,
         })
         .collect();
 
@@ -1505,7 +1950,14 @@ fn empty_transaction_meta(op_count: usize) -> TransactionMeta {
         op_changes.push(empty_entry_changes());
         op_events.push(Vec::new());
     }
-    build_transaction_meta(empty_entry_changes(), op_changes, op_events, None, Vec::new())
+    build_transaction_meta(
+        empty_entry_changes(),
+        op_changes,
+        op_events,
+        Vec::new(),
+        None,
+        Vec::new(),
+    )
 }
 
 fn map_failure_to_result(
@@ -1526,6 +1978,27 @@ fn map_failure_to_result(
         ExecutionFailure::NotSupported => TransactionResultResult::TxNotSupported,
         ExecutionFailure::BadSponsorship => TransactionResultResult::TxBadSponsorship,
         ExecutionFailure::OperationFailed => TransactionResultResult::TxFailed(Vec::new().try_into().unwrap()),
+    }
+}
+
+fn insufficient_refundable_fee_result(op: &Operation) -> OperationResult {
+    match &op.body {
+        OperationBody::InvokeHostFunction(_) => {
+            OperationResult::OpInner(OperationResultTr::InvokeHostFunction(
+                stellar_xdr::curr::InvokeHostFunctionResult::InsufficientRefundableFee,
+            ))
+        }
+        OperationBody::ExtendFootprintTtl(_) => {
+            OperationResult::OpInner(OperationResultTr::ExtendFootprintTtl(
+                stellar_xdr::curr::ExtendFootprintTtlResult::InsufficientRefundableFee,
+            ))
+        }
+        OperationBody::RestoreFootprint(_) => {
+            OperationResult::OpInner(OperationResultTr::RestoreFootprint(
+                stellar_xdr::curr::RestoreFootprintResult::InsufficientRefundableFee,
+            ))
+        }
+        _ => OperationResult::OpNotSupported,
     }
 }
 
@@ -1933,6 +2406,7 @@ pub fn execute_transaction_set(
     delta: &mut LedgerDelta,
     soroban_config: SorobanConfig,
     soroban_base_prng_seed: [u8; 32],
+    classic_events: ClassicEventConfig,
     op_invariants: Option<OperationInvariantRunner>,
 ) -> Result<(
     Vec<TransactionExecutionResult>,
@@ -1950,6 +2424,7 @@ pub fn execute_transaction_set(
         network_id,
         id_pool,
         soroban_config,
+        classic_events,
         op_invariants,
     );
 
@@ -1972,12 +2447,16 @@ pub fn execute_transaction_set(
             .fee_changes
             .clone()
             .unwrap_or_else(empty_entry_changes);
+        let post_fee_changes = result
+            .post_fee_changes
+            .clone()
+            .unwrap_or_else(empty_entry_changes);
         let tx_result_meta = TransactionResultMetaV1 {
             ext: ExtensionPoint::V0,
             result: tx_result.clone(),
             fee_processing: fee_changes,
             tx_apply_processing: tx_meta,
-            post_tx_apply_fee_processing: empty_entry_changes(),
+            post_tx_apply_fee_processing: post_fee_changes,
         };
 
         info!(
@@ -2021,6 +2500,7 @@ mod tests {
             NetworkId::testnet(),
             0,
             SorobanConfig::default(),
+            ClassicEventConfig::default(),
             None,
         );
 

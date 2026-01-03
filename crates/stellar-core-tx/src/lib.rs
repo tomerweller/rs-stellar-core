@@ -59,6 +59,7 @@
 
 mod apply;
 mod error;
+mod events;
 mod frame;
 pub mod operations;
 mod result;
@@ -68,6 +69,10 @@ pub mod validation;
 
 // Re-export error types
 pub use error::TxError;
+pub use events::{
+    make_account_address, make_claimable_balance_address, make_muxed_account_address,
+    ClassicEventConfig, OpEventManager, TxEventManager,
+};
 
 // Re-export frame types
 pub use frame::{muxed_to_account_id, muxed_to_ed25519, TransactionFrame};

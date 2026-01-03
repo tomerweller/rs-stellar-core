@@ -2,6 +2,7 @@
 //!
 //! Tracks CPU instructions and memory usage for contract execution.
 
+use soroban_env_host::fees::{FeeConfiguration, RentFeeConfiguration};
 use stellar_xdr::curr::ContractCostParams;
 
 /// Soroban network configuration for contract execution.
@@ -9,7 +10,7 @@ use stellar_xdr::curr::ContractCostParams;
 /// This contains the cost parameters and limits loaded from the network's
 /// ConfigSettingEntry entries. These must match the network to produce
 /// correct transaction results and ledger hashes.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SorobanConfig {
     /// CPU cost model parameters from ConfigSettingId::ContractCostParamsCpuInstructions.
     pub cpu_cost_params: ContractCostParams,
@@ -25,60 +26,12 @@ pub struct SorobanConfig {
     pub min_persistent_entry_ttl: u32,
     /// Maximum TTL for any entry.
     pub max_entry_ttl: u32,
-    /// Fee configuration for resource fee computation.
+    /// Fee configuration for Soroban resource fees.
     pub fee_config: FeeConfiguration,
-    /// Rent fee configuration for TTL extension fees.
+    /// Rent fee configuration for Soroban storage.
     pub rent_fee_config: RentFeeConfiguration,
-}
-
-/// Fee configuration for Soroban resource fee computation.
-///
-/// These values come from ConfigSettingEntry settings in the ledger.
-#[derive(Debug, Clone, Default)]
-pub struct FeeConfiguration {
-    /// Fee per 10,000 instructions.
-    pub fee_per_instruction_increment: i64,
-    /// Fee per ledger entry read.
-    pub fee_per_read_entry: i64,
-    /// Fee per ledger entry written.
-    pub fee_per_write_entry: i64,
-    /// Fee per 1KB read from ledger.
-    pub fee_per_read_1kb: i64,
-    /// Fee per 1KB written to ledger.
-    pub fee_per_write_1kb: i64,
-    /// Fee per 1KB of historical storage.
-    pub fee_per_historical_1kb: i64,
-    /// Fee per 1KB of contract events.
-    pub fee_per_contract_event_1kb: i64,
-    /// Fee per 1KB of transaction size (bandwidth).
-    pub fee_per_tx_size_1kb: i64,
-}
-
-/// Rent fee configuration for TTL extension fees.
-#[derive(Debug, Clone)]
-pub struct RentFeeConfiguration {
-    /// Fee per 1KB written to ledger (same as write fee).
-    pub fee_per_write_1kb: i64,
-    /// Fee per 1KB of rented ledger space (computed from state size).
-    pub fee_per_rent_1kb: i64,
-    /// Fee per entry written.
-    pub fee_per_write_entry: i64,
-    /// Rent rate denominator for persistent storage.
-    pub persistent_rent_rate_denominator: i64,
-    /// Rent rate denominator for temporary storage.
-    pub temporary_rent_rate_denominator: i64,
-}
-
-impl Default for RentFeeConfiguration {
-    fn default() -> Self {
-        Self {
-            fee_per_write_1kb: 10000,
-            fee_per_rent_1kb: 1000,
-            fee_per_write_entry: 10000,
-            persistent_rent_rate_denominator: 2103840,  // ~1 year in ledgers
-            temporary_rent_rate_denominator: 4607,      // ~6.4 hours in ledgers
-        }
-    }
+    /// Maximum size of contract events + return value per tx.
+    pub tx_max_contract_events_size_bytes: u32,
 }
 
 impl Default for SorobanConfig {
@@ -95,14 +48,10 @@ impl Default for SorobanConfig {
             max_entry_ttl: 6312000,                 // ~1 year
             fee_config: FeeConfiguration::default(),
             rent_fee_config: RentFeeConfiguration::default(),
+            tx_max_contract_events_size_bytes: 0,
         }
     }
 }
-
-/// Constants for fee computation.
-const INSTRUCTIONS_INCREMENT: i64 = 10000;
-const DATA_SIZE_1KB_INCREMENT: i64 = 1024;
-const TX_BASE_RESULT_SIZE: u32 = 300;
 
 impl SorobanConfig {
     /// Check if this config has valid cost parameters.
@@ -111,149 +60,6 @@ impl SorobanConfig {
     pub fn has_valid_cost_params(&self) -> bool {
         !self.cpu_cost_params.0.is_empty() && !self.mem_cost_params.0.is_empty()
     }
-
-    /// Compute the resource fee for a Soroban transaction.
-    ///
-    /// Returns `(non_refundable_fee, refundable_fee)`.
-    /// - non_refundable_fee: instruction, entry, byte, historical, bandwidth fees
-    /// - refundable_fee: event fees only (rent is computed separately)
-    pub fn compute_resource_fee(
-        &self,
-        instructions: u32,
-        read_entries: u32,
-        write_entries: u32,
-        read_bytes: u32,
-        write_bytes: u32,
-        tx_size: u32,
-        events_size: u32,
-    ) -> (i64, i64) {
-        // Instruction fee
-        let compute_fee = compute_fee_per_increment(
-            instructions,
-            self.fee_config.fee_per_instruction_increment,
-            INSTRUCTIONS_INCREMENT,
-        );
-
-        // Entry fees
-        let read_entry_fee = self.fee_config.fee_per_read_entry
-            .saturating_mul(read_entries as i64);
-        let write_entry_fee = self.fee_config.fee_per_write_entry
-            .saturating_mul(write_entries as i64);
-
-        // Byte fees
-        let read_bytes_fee = compute_fee_per_increment(
-            read_bytes,
-            self.fee_config.fee_per_read_1kb,
-            DATA_SIZE_1KB_INCREMENT,
-        );
-        let write_bytes_fee = compute_fee_per_increment(
-            write_bytes,
-            self.fee_config.fee_per_write_1kb,
-            DATA_SIZE_1KB_INCREMENT,
-        );
-
-        // Historical fee
-        let historical_fee = compute_fee_per_increment(
-            tx_size.saturating_add(TX_BASE_RESULT_SIZE),
-            self.fee_config.fee_per_historical_1kb,
-            DATA_SIZE_1KB_INCREMENT,
-        );
-
-        // Bandwidth fee
-        let bandwidth_fee = compute_fee_per_increment(
-            tx_size,
-            self.fee_config.fee_per_tx_size_1kb,
-            DATA_SIZE_1KB_INCREMENT,
-        );
-
-        // Events fee (refundable)
-        let events_fee = compute_fee_per_increment(
-            events_size,
-            self.fee_config.fee_per_contract_event_1kb,
-            DATA_SIZE_1KB_INCREMENT,
-        );
-
-        let non_refundable = compute_fee
-            .saturating_add(read_entry_fee)
-            .saturating_add(write_entry_fee)
-            .saturating_add(read_bytes_fee)
-            .saturating_add(write_bytes_fee)
-            .saturating_add(historical_fee)
-            .saturating_add(bandwidth_fee);
-
-        (non_refundable, events_fee)
-    }
-
-    /// Compute the fee charged for a Soroban transaction after execution.
-    ///
-    /// This computes the actual fee based on:
-    /// - Declared resource fee
-    /// - Non-refundable portion (from declared resources)
-    /// - Actual event size (for refundable fees)
-    /// - Inclusion fee
-    ///
-    /// The approach is:
-    /// 1. Compute non_refundable_fee from declared resources
-    /// 2. max_refundable = declared_resource_fee - non_refundable_fee
-    /// 3. Compute actual_refundable from actual events size
-    /// 4. refund = max_refundable - actual_refundable
-    /// 5. fee_charged = declared_resource_fee - refund + inclusion_fee
-    ///
-    /// Returns the total fee to be charged.
-    pub fn compute_fee_charged(
-        &self,
-        declared_resource_fee: i64,
-        inclusion_fee: i64,
-        instructions: u32,
-        read_entries: u32,
-        write_entries: u32,
-        read_bytes: u32,
-        write_bytes: u32,
-        tx_size: u32,
-        actual_events_size: u32,
-    ) -> i64 {
-        // Compute non-refundable fee from declared resources (events_size = 0 to get just non-refundable)
-        let (non_refundable, _) = self.compute_resource_fee(
-            instructions,
-            read_entries,
-            write_entries,
-            read_bytes,
-            write_bytes,
-            tx_size,
-            0, // We don't use declared events here
-        );
-
-        // The max refundable is what's left after non-refundable from declared
-        let max_refundable = declared_resource_fee.saturating_sub(non_refundable).max(0);
-
-        // Compute actual refundable fee (events)
-        let actual_events_fee = compute_fee_per_increment(
-            actual_events_size,
-            self.fee_config.fee_per_contract_event_1kb,
-            DATA_SIZE_1KB_INCREMENT,
-        );
-
-        // Actual consumed refundable (events fee only for now, rent TBD)
-        let actual_consumed_refundable = actual_events_fee;
-
-        // Refund is unused refundable (capped at max)
-        let refund = max_refundable.saturating_sub(actual_consumed_refundable).max(0);
-
-        // Fee charged = declared - refund + inclusion
-        // But we need to cap the fee at the originally charged amount
-        let fee = declared_resource_fee
-            .saturating_sub(refund)
-            .saturating_add(inclusion_fee);
-
-        fee
-    }
-}
-
-/// Compute fee for a resource using the increment-based formula.
-fn compute_fee_per_increment(resource: u32, fee_per_increment: i64, increment: i64) -> i64 {
-    // Round up: (resource + increment - 1) / increment * fee
-    let increments = (resource as i64).saturating_add(increment - 1) / increment;
-    increments.saturating_mul(fee_per_increment)
 }
 
 /// Resource limits for Soroban execution.

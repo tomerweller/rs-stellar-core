@@ -112,6 +112,15 @@ fn execute_contract_invocation(
         soroban_config,
     ) {
         Ok(result) => {
+            if soroban_config.tx_max_contract_events_size_bytes > 0
+                && result.contract_events_and_return_value_size
+                    > soroban_config.tx_max_contract_events_size_bytes
+            {
+                return Ok(OperationExecutionResult::new(make_result(
+                    InvokeHostFunctionResultCode::ResourceLimitExceeded,
+                    Hash([0u8; 32]),
+                )));
+            }
             // Apply storage changes back to our state.
             apply_soroban_storage_changes(state, &result.storage_changes);
 
@@ -253,10 +262,14 @@ fn build_soroban_operation_meta(
         })
         .collect();
 
+    diagnostic_events.extend(result.diagnostic_events.iter().cloned());
+
     SorobanOperationMeta {
         events,
         diagnostic_events,
         return_value: Some(result.return_value.clone()),
+        event_size_bytes: result.contract_events_and_return_value_size,
+        rent_fee: result.rent_fee,
     }
 }
 

@@ -49,6 +49,10 @@ pub struct AppConfig {
     /// Surge pricing configuration.
     #[serde(default)]
     pub surge_pricing: SurgePricingConfig,
+
+    /// Classic event emission configuration.
+    #[serde(default)]
+    pub events: EventsConfig,
 }
 
 /// Node identity and behavior configuration.
@@ -184,6 +188,27 @@ impl Default for SurgePricingConfig {
             classic_byte_allowance: default_classic_byte_allowance(),
             soroban_byte_allowance: default_soroban_byte_allowance(),
             max_dex_tx_operations: None,
+        }
+    }
+}
+
+/// Classic event emission configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventsConfig {
+    /// Emit classic asset events in transaction metadata.
+    #[serde(default)]
+    pub emit_classic_events: bool,
+
+    /// Backfill classic asset events to pre-23 format.
+    #[serde(default)]
+    pub backfill_stellar_asset_events: bool,
+}
+
+impl Default for EventsConfig {
+    fn default() -> Self {
+        Self {
+            emit_classic_events: false,
+            backfill_stellar_asset_events: false,
         }
     }
 }
@@ -622,6 +647,7 @@ impl AppConfig {
             logging: LoggingConfig::default(),
             http: HttpConfig::default(),
             surge_pricing: SurgePricingConfig::default(),
+            events: EventsConfig::default(),
         }
     }
 
@@ -672,6 +698,7 @@ impl AppConfig {
             logging: LoggingConfig::default(),
             http: HttpConfig::default(),
             surge_pricing: SurgePricingConfig::default(),
+            events: EventsConfig::default(),
         }
     }
 
@@ -790,6 +817,12 @@ impl AppConfig {
             .saturating_add(self.surge_pricing.soroban_byte_allowance);
         if total_bytes > 10 * 1024 * 1024 {
             anyhow::bail!("surge_pricing byte allowances exceed 10MB total");
+        }
+
+        if self.events.backfill_stellar_asset_events && !self.events.emit_classic_events {
+            anyhow::bail!(
+                "events.backfill_stellar_asset_events requires events.emit_classic_events"
+            );
         }
 
         // Validate quorum set if validator

@@ -63,6 +63,7 @@ Scope: Protocol 23+ only, SQLite only, no production hardening. Metrics parity i
 
 ### Testing Gaps
 - Upstream tx meta hash vector coverage (synthetic vectors exist; upstream fixtures pending).
+- Classic event emission golden vectors (ledger-close-meta fixtures with EMIT_CLASSIC_EVENTS enabled).
 - Expanded per-operation regression suite for classic + Soroban edge cases.
 
 ## History / Catchup
@@ -92,7 +93,7 @@ Scope: Protocol 23+ only, SQLite only, no production hardening. Metrics parity i
 ## Invariants
 
 ### Functional Gaps
-- Partial parity: added ledger seq bounds, account sequence/signers/flags/home_domain/ext/num_sub_entries checks; trustline asset/limit/flags/extensions; offer assets/validity/flags; claimable balance sponsorship/asset/predicate/flag checks; data name validation; liquidity pool parameter/sponsorship checks; contract code hash validation; sponsorship count checks; account subentries count checks; liabilities/order-book/constant-product checks at operation + ledger close; and ledger-close constant product check with pool-share decrease exemption. Added op-level EventsAreConsistentWithEntryDiffs for Soroban contract events. Full invariant set parity still missing (bucket/ledger/db, classic event emission + protocol-23 reconciliation, etc.).
+- Partial parity: added ledger seq bounds, account sequence/signers/flags/home_domain/ext/num_sub_entries checks; trustline asset/limit/flags/extensions; offer assets/validity/flags; claimable balance sponsorship/asset/predicate/flag checks; data name validation; liquidity pool parameter/sponsorship checks; contract code hash validation; sponsorship count checks; account subentries count checks; liabilities/order-book/constant-product checks at operation + ledger close; and ledger-close constant product check with pool-share decrease exemption. Added op-level EventsAreConsistentWithEntryDiffs for classic + Soroban contract events. Full invariant set parity still missing (bucket/ledger/db invariants, etc.).
 
 ### Testing Gaps
 - Full invariant coverage tests and replay failure regression tests.
