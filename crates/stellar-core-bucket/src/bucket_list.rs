@@ -107,6 +107,20 @@ impl BucketLevel {
         snap: Bucket,
         keep_dead_entries: bool,
     ) -> Result<()> {
+        self.prepare_with_saved_curr(ledger_seq, protocol_version, snap, keep_dead_entries, None)
+    }
+
+    /// Prepare the next bucket for this level, optionally using a saved curr value.
+    /// This is needed during synchronous batch updates where snap() may have already
+    /// cleared the curr before prepare() is called.
+    fn prepare_with_saved_curr(
+        &mut self,
+        ledger_seq: u32,
+        protocol_version: u32,
+        snap: Bucket,
+        keep_dead_entries: bool,
+        saved_curr: Option<Bucket>,
+    ) -> Result<()> {
         if self.next.is_some() {
             return Err(BucketError::Merge("bucket merge already in progress".to_string()));
         }
@@ -114,7 +128,8 @@ impl BucketLevel {
         let curr = if BucketList::should_merge_with_empty_curr(ledger_seq, self.level) {
             Bucket::empty()
         } else {
-            self.curr.clone()
+            // Use saved curr if provided, otherwise use self.curr
+            saved_curr.unwrap_or_else(|| self.curr.clone())
         };
 
         let merged = merge_buckets(&curr, &snap, keep_dead_entries, protocol_version)?;
@@ -329,12 +344,43 @@ impl BucketList {
             return Err(BucketError::Merge("ledger sequence must be > 0".to_string()));
         }
 
+        // In synchronous mode, we need to handle the bucket list update carefully.
+        // The key insight is that snap() clears level.curr, but prepare() needs the
+        // ORIGINAL curr value before any snap() calls modified it.
+        //
+        // First, save the original curr values for all levels that will have prepare() called
+        let mut saved_currs: [Option<Bucket>; BUCKET_LIST_LEVELS] = Default::default();
+        for i in 1..BUCKET_LIST_LEVELS {
+            if Self::level_should_spill(ledger_seq, i - 1) {
+                // Save the curr before any snap() calls modify it
+                saved_currs[i] = Some(self.levels[i].curr.clone());
+            }
+        }
+
+        // First pass: call snap() on source levels to get the incoming data
+        let mut incoming_snaps: [Option<Bucket>; BUCKET_LIST_LEVELS] = Default::default();
         for i in (1..BUCKET_LIST_LEVELS).rev() {
             if Self::level_should_spill(ledger_seq, i - 1) {
-                let snap = self.levels[i - 1].snap();
-                self.levels[i].commit();
+                // snap() returns the old curr and sets snap = curr, then clears curr
+                incoming_snaps[i] = Some(self.levels[i - 1].snap());
+            }
+        }
+
+        // Second pass: do the merges and commits using saved curr values
+        // Process from low levels to high to maintain proper dependency order
+        for i in 1..BUCKET_LIST_LEVELS {
+            if let Some(incoming_snap) = incoming_snaps[i].take() {
                 let keep_dead = Self::keep_tombstone_entries(i);
-                self.levels[i].prepare(ledger_seq, protocol_version, snap, keep_dead)?;
+                // Use saved curr value instead of self.curr (which may have been cleared by snap())
+                let saved_curr = saved_currs[i].take();
+                self.levels[i].prepare_with_saved_curr(
+                    ledger_seq,
+                    protocol_version,
+                    incoming_snap,
+                    keep_dead,
+                    saved_curr,
+                )?;
+                self.levels[i].commit();
             }
         }
 
