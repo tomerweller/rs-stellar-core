@@ -139,12 +139,6 @@ fn get_entry_ttl(state: &LedgerStateManager, key: &LedgerKey, current_ledger: u3
             let ttl = state.get_ttl(&key_hash).map(|ttl| ttl.live_until_ledger_seq);
             if let Some(live_until) = ttl {
                 if live_until < current_ledger {
-                    eprintln!(
-                        "=== SOROBAN TTL EXPIRED: {} live_until={} current={} ===",
-                        if matches!(key, LedgerKey::ContractCode(_)) { "ContractCode" } else { "ContractData" },
-                        live_until,
-                        current_ledger
-                    );
                     tracing::warn!(
                         current_ledger,
                         live_until,
@@ -153,11 +147,6 @@ fn get_entry_ttl(state: &LedgerStateManager, key: &LedgerKey, current_ledger: u3
                     );
                 }
             } else {
-                eprintln!(
-                    "=== SOROBAN NO TTL: {} {:?} ===",
-                    if matches!(key, LedgerKey::ContractCode(_)) { "ContractCode" } else { "ContractData" },
-                    key
-                );
                 tracing::warn!(
                     key_type = if matches!(key, LedgerKey::ContractCode(_)) { "ContractCode" } else { "ContractData" },
                     "Soroban entry has NO TTL record"
@@ -230,13 +219,8 @@ pub fn build_storage_map(
                 live_until = ?ttl,
                 "Soroban footprint entry found"
             );
-            // Extra debug for contract code
-            if let LedgerEntryData::ContractCode(ref cc) = e.data {
-                eprintln!("=== LOADED CONTRACT CODE: hash={:?}, code_len={} ===", cc.hash.0, cc.code.len());
-            }
         } else {
             missing_count += 1;
-            eprintln!("=== SOROBAN FOOTPRINT ENTRY MISSING: {} {:?} ===", key_type, key);
             tracing::warn!(
                 key_type,
                 access = ?access_type,
