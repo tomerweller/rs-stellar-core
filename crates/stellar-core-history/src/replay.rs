@@ -14,7 +14,7 @@ use crate::{verify, HistoryError, Result};
 use stellar_core_common::{Hash256, NetworkId};
 use stellar_core_invariant::LedgerEntryChange;
 use stellar_core_ledger::{
-    execution::{execute_transaction_set, load_soroban_config},
+    execution::{execute_transaction_set, load_soroban_config, OperationInvariantRunner},
     LedgerDelta, LedgerError, LedgerSnapshot, SnapshotHandle, TransactionSetVariant,
 };
 use stellar_xdr::curr::{
@@ -188,6 +188,22 @@ pub fn replay_ledger_with_execution(
     let soroban_config = load_soroban_config(&snapshot);
     // Use transaction set hash as base PRNG seed for Soroban execution
     let soroban_base_prng_seed = tx_set.hash();
+    let op_invariants = if config.verify_invariants {
+        let entries = bucket_list.live_entries().map_err(|e| {
+            HistoryError::CatchupFailed(format!(
+                "failed to build op invariants state: {}",
+                e
+            ))
+        })?;
+        Some(OperationInvariantRunner::new(entries, header.clone(), *network_id).map_err(|e| {
+            HistoryError::CatchupFailed(format!(
+                "failed to build op invariants state: {}",
+                e
+            ))
+        })?)
+    } else {
+        None
+    };
     let (results, tx_results, _tx_result_metas, _total_fees) = execute_transaction_set(
         &snapshot,
         &transactions,
@@ -200,6 +216,7 @@ pub fn replay_ledger_with_execution(
         &mut delta,
         soroban_config,
         soroban_base_prng_seed.0,
+        op_invariants,
     )
     .map_err(|e| HistoryError::CatchupFailed(format!("replay execution failed: {}", e)))?;
 

@@ -9,7 +9,7 @@
 use crate::{
     close::{LedgerCloseData, LedgerCloseResult, LedgerCloseStats, TransactionSetVariant, UpgradeContext},
     delta::{EntryChange, LedgerDelta},
-    execution::{execute_transaction_set, TransactionExecutionResult},
+    execution::{execute_transaction_set, OperationInvariantRunner, TransactionExecutionResult},
     header::{compute_header_hash, create_next_header},
     snapshot::{LedgerSnapshot, SnapshotHandle, SnapshotManager},
     LedgerError, Result,
@@ -789,6 +789,17 @@ impl<'a> LedgerCloseContext<'a> {
             return Ok(vec![]);
         }
 
+        let op_invariants = if self.manager.config.validate_invariants {
+            let entries = self.manager.bucket_list.read().live_entries()?;
+            Some(OperationInvariantRunner::new(
+                entries,
+                self.prev_header.clone(),
+                self.manager.network_id,
+            )?)
+        } else {
+            None
+        };
+
         // Load SorobanConfig from ledger ConfigSettingEntry for accurate Soroban execution
         let soroban_config = crate::execution::load_soroban_config(&self.snapshot);
         // Use transaction set hash as base PRNG seed for Soroban execution
@@ -805,6 +816,7 @@ impl<'a> LedgerCloseContext<'a> {
             &mut self.delta,
             soroban_config,
             soroban_base_prng_seed.0,
+            op_invariants,
         )?;
         self.id_pool = id_pool;
         self.tx_results = tx_results;
@@ -924,6 +936,7 @@ impl<'a> LedgerCloseContext<'a> {
                 total_coins_delta: self.delta.total_coins_delta(),
                 changes: &changes,
                 full_entries: Some(&full_entries),
+                op_events: None,
             };
             self.manager.invariants.read().check_all(&ctx)?;
         }

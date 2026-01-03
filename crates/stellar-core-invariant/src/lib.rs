@@ -2,7 +2,11 @@
 
 use stellar_core_common::Hash256;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use stellar_xdr::curr::{AccountId, LedgerEntry, LedgerEntryData, LedgerHeader};
+use stellar_xdr::curr::{
+    AccountId, AlphaNum4, AlphaNum12, Asset, AssetCode12, AssetCode4, ContractEvent,
+    ContractEventBody, ContractEventV0, ContractId, ContractIdPreimage, Hash, HashIdPreimage,
+    HashIdPreimageContractId, LedgerEntry, LedgerEntryData, LedgerHeader, ScAddress, ScVal,
+};
 use thiserror::Error;
 use tracing::error;
 
@@ -46,6 +50,7 @@ pub struct InvariantContext<'a> {
     pub total_coins_delta: i64,
     pub changes: &'a [LedgerEntryChange],
     pub full_entries: Option<&'a [LedgerEntry]>,
+    pub op_events: Option<&'a [ContractEvent]>,
 }
 
 pub trait Invariant: Send + Sync {
@@ -1094,6 +1099,569 @@ impl Invariant for ConstantProductInvariant {
     }
 }
 
+/// Invariant: contract events match ledger entry diffs for SAC balance changes.
+pub struct EventsAreConsistentWithEntryDiffs {
+    network_id: Hash256,
+}
+
+impl EventsAreConsistentWithEntryDiffs {
+    pub fn new(network_id: Hash256) -> Self {
+        Self { network_id }
+    }
+}
+
+impl Invariant for EventsAreConsistentWithEntryDiffs {
+    fn name(&self) -> &str {
+        "EventsAreConsistentWithEntryDiffs"
+    }
+
+    fn check(&self, ctx: &InvariantContext) -> Result<(), InvariantError> {
+        let Some(events) = ctx.op_events else {
+            return Ok(());
+        };
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        let mut stellar_asset_contract_ids = HashMap::new();
+        let mut aggregated = aggregate_event_diffs(
+            &self.network_id,
+            &mut stellar_asset_contract_ids,
+            events,
+        )
+        .ok_or_else(|| InvariantError::Violated {
+            name: self.name().to_string(),
+            details: "received invalid events".to_string(),
+        })?;
+
+        for change in ctx.changes {
+            let res = verify_events_delta(
+                &mut aggregated,
+                &stellar_asset_contract_ids,
+                change,
+                ctx.curr_header.ledger_version,
+            );
+            if let Some(details) = res {
+                return Err(InvariantError::Violated {
+                    name: self.name().to_string(),
+                    details,
+                });
+            }
+        }
+
+        for asset_map in aggregated.event_amounts.values() {
+            for amount in asset_map.values() {
+                if *amount != 0 {
+                    return Err(InvariantError::Violated {
+                        name: self.name().to_string(),
+                        details: "some event diffs not consumed".to_string(),
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+struct AggregatedEvents {
+    event_amounts: HashMap<ScAddress, HashMap<Asset, i128>>,
+    is_authorized: HashMap<ScAddress, HashMap<Asset, Option<bool>>>,
+}
+
+impl AggregatedEvents {
+    fn add_asset_balance(
+        &mut self,
+        addr: &ScAddress,
+        asset: &Asset,
+        amount: i128,
+    ) -> bool {
+        let entry = self
+            .event_amounts
+            .entry(addr.clone())
+            .or_default()
+            .entry(asset.clone())
+            .or_insert(0);
+        if let Some(next) = entry.checked_add(amount) {
+            *entry = next;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn subtract_asset_balance(
+        &mut self,
+        addr: &ScAddress,
+        asset: &Asset,
+        amount: i128,
+    ) -> bool {
+        let entry = self
+            .event_amounts
+            .entry(addr.clone())
+            .or_default()
+            .entry(asset.clone())
+            .or_insert(0);
+        if let Some(next) = entry.checked_sub(amount) {
+            *entry = next;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn consume_amount(&mut self, addr: &ScAddress, asset: &Asset) -> i128 {
+        let Some(asset_map) = self.event_amounts.get_mut(addr) else {
+            return 0;
+        };
+        let Some(amount) = asset_map.remove(asset) else {
+            return 0;
+        };
+        if asset_map.is_empty() {
+            self.event_amounts.remove(addr);
+        }
+        amount
+    }
+}
+
+fn aggregate_event_diffs(
+    network_id: &Hash256,
+    stellar_asset_contract_ids: &mut HashMap<ContractId, Asset>,
+    events: &[ContractEvent],
+) -> Option<AggregatedEvents> {
+    let mut res = AggregatedEvents {
+        event_amounts: HashMap::new(),
+        is_authorized: HashMap::new(),
+    };
+
+    for event in events {
+        let Some(contract_id) = event.contract_id.as_ref() else {
+            continue;
+        };
+        let (topics, data) = match &event.body {
+            ContractEventBody::V0(ContractEventV0 { topics, data }) => (topics, data),
+        };
+
+        if topics.is_empty() {
+            return None;
+        }
+
+        let asset = if let Some(existing) = stellar_asset_contract_ids.get(contract_id) {
+            existing.clone()
+        } else {
+            let maybe_asset = get_asset_from_event(event, network_id)?;
+            stellar_asset_contract_ids.insert(contract_id.clone(), maybe_asset.clone());
+            maybe_asset
+        };
+
+        let Some(event_name) = scval_symbol_string(&topics[0]) else {
+            return None;
+        };
+
+        match event_name.as_str() {
+            "transfer" => {
+                if topics.len() != 4 {
+                    return None;
+                }
+                let from = scval_address(&topics[1])?;
+                let to = scval_address(&topics[2])?;
+                let amount = get_amount_from_data(data);
+                if amount < 0 {
+                    return None;
+                }
+                if !res.subtract_asset_balance(&from, &asset, amount) {
+                    return None;
+                }
+                if !res.add_asset_balance(&to, &asset, amount) {
+                    return None;
+                }
+            }
+            "mint" => {
+                if topics.len() != 3 {
+                    return None;
+                }
+                let to = scval_address(&topics[1])?;
+                let amount = get_amount_from_data(data);
+                if amount < 0 {
+                    return None;
+                }
+                if !res.add_asset_balance(&to, &asset, amount) {
+                    return None;
+                }
+            }
+            "burn" | "clawback" => {
+                if topics.len() != 3 {
+                    return None;
+                }
+                let from = scval_address(&topics[1])?;
+                let amount = get_amount_from_data(data);
+                if amount < 0 {
+                    return None;
+                }
+                if !res.subtract_asset_balance(&from, &asset, amount) {
+                    return None;
+                }
+            }
+            "set_authorized" => {
+                if topics.len() != 3 {
+                    return None;
+                }
+                let addr = scval_address(&topics[1])?;
+                let authorized = match data {
+                    ScVal::Bool(value) => *value,
+                    _ => return None,
+                };
+                res.is_authorized
+                    .entry(addr)
+                    .or_default()
+                    .insert(asset.clone(), Some(authorized));
+            }
+            _ => {}
+        }
+    }
+
+    Some(res)
+}
+
+fn verify_events_delta(
+    agg: &mut AggregatedEvents,
+    stellar_asset_contract_ids: &HashMap<ContractId, Asset>,
+    change: &LedgerEntryChange,
+    protocol_version: u32,
+) -> Option<String> {
+    let current = change.current_entry();
+    let previous = change.previous_entry();
+    let entry = current.or(previous)?;
+
+    match &entry.data {
+        LedgerEntryData::Account(account) => {
+            let native = Asset::Native;
+            let addr = ScAddress::Account(account.account_id.clone());
+            let event_diff = agg.consume_amount(&addr, &native);
+            let entry_diff = (current
+                .and_then(|entry| match &entry.data {
+                    LedgerEntryData::Account(a) => Some(a.balance),
+                    _ => None,
+                })
+                .unwrap_or(0))
+                - (previous
+                    .and_then(|entry| match &entry.data {
+                        LedgerEntryData::Account(a) => Some(a.balance),
+                        _ => None,
+                    })
+                    .unwrap_or(0));
+            if i128::from(entry_diff) != event_diff {
+                return Some("Account diff does not match events".to_string());
+            }
+        }
+        LedgerEntryData::Trustline(trust) => {
+            let asset = match &trust.asset {
+                stellar_xdr::curr::TrustLineAsset::CreditAlphanum4(a) => {
+                    Asset::CreditAlphanum4(a.clone())
+                }
+                stellar_xdr::curr::TrustLineAsset::CreditAlphanum12(a) => {
+                    Asset::CreditAlphanum12(a.clone())
+                }
+                stellar_xdr::curr::TrustLineAsset::PoolShare(_) => return None,
+                stellar_xdr::curr::TrustLineAsset::Native => {
+                    return Some("Invalid asset in trustline".to_string())
+                }
+            };
+            let owner = ScAddress::Account(trust.account_id.clone());
+            if !check_authorization(agg, &owner, &asset, current, previous) {
+                return Some("trustline authorization and events do not match".to_string());
+            }
+            let event_diff = agg.consume_amount(&owner, &asset);
+            let entry_diff = (current
+                .and_then(|entry| match &entry.data {
+                    LedgerEntryData::Trustline(tl) => Some(tl.balance),
+                    _ => None,
+                })
+                .unwrap_or(0))
+                - (previous
+                    .and_then(|entry| match &entry.data {
+                        LedgerEntryData::Trustline(tl) => Some(tl.balance),
+                        _ => None,
+                    })
+                    .unwrap_or(0));
+            if i128::from(entry_diff) != event_diff {
+                return Some("Trustline diff does not match events".to_string());
+            }
+        }
+        LedgerEntryData::ClaimableBalance(balance) => {
+            let addr = ScAddress::ClaimableBalance(balance.balance_id.clone());
+            let event_diff = agg.consume_amount(&addr, &balance.asset);
+            let entry_diff = (current
+                .and_then(|entry| match &entry.data {
+                    LedgerEntryData::ClaimableBalance(b) => Some(b.amount),
+                    _ => None,
+                })
+                .unwrap_or(0))
+                - (previous
+                    .and_then(|entry| match &entry.data {
+                        LedgerEntryData::ClaimableBalance(b) => Some(b.amount),
+                        _ => None,
+                    })
+                    .unwrap_or(0));
+            if i128::from(entry_diff) != event_diff {
+                return Some("ClaimableBalance diff does not match events".to_string());
+            }
+        }
+        LedgerEntryData::LiquidityPool(pool) => {
+            let current_body = match current {
+                Some(entry) => match &entry.data {
+                    LedgerEntryData::LiquidityPool(lp) => Some(&lp.body),
+                    _ => None,
+                },
+                None => None,
+            };
+            let previous_body = match previous {
+                Some(entry) => match &entry.data {
+                    LedgerEntryData::LiquidityPool(lp) => Some(&lp.body),
+                    _ => None,
+                },
+                None => None,
+            };
+            let (asset_a, asset_b, reserve_a, reserve_b) = match (current_body, previous_body) {
+                (Some(body), _) => match body {
+                    stellar_xdr::curr::LiquidityPoolEntryBody::LiquidityPoolConstantProduct(cp) => (
+                        cp.params.asset_a.clone(),
+                        cp.params.asset_b.clone(),
+                        cp.reserve_a,
+                        cp.reserve_b,
+                    ),
+                },
+                (None, Some(body)) => match body {
+                    stellar_xdr::curr::LiquidityPoolEntryBody::LiquidityPoolConstantProduct(cp) => (
+                        cp.params.asset_a.clone(),
+                        cp.params.asset_b.clone(),
+                        0,
+                        0,
+                    ),
+                },
+                (None, None) => return None,
+            };
+            let prev_reserve_a = previous_body.and_then(|body| match body {
+                stellar_xdr::curr::LiquidityPoolEntryBody::LiquidityPoolConstantProduct(cp) => Some(cp.reserve_a),
+            }).unwrap_or(0);
+            let prev_reserve_b = previous_body.and_then(|body| match body {
+                stellar_xdr::curr::LiquidityPoolEntryBody::LiquidityPoolConstantProduct(cp) => Some(cp.reserve_b),
+            }).unwrap_or(0);
+            let entry_a_diff = reserve_a - prev_reserve_a;
+            let entry_b_diff = reserve_b - prev_reserve_b;
+            let addr = ScAddress::LiquidityPool(pool.liquidity_pool_id.clone());
+            let event_a_diff = agg.consume_amount(&addr, &asset_a);
+            let event_b_diff = agg.consume_amount(&addr, &asset_b);
+            if i128::from(entry_a_diff) != event_a_diff || i128::from(entry_b_diff) != event_b_diff {
+                return Some("LiquidityPool diff does not match events".to_string());
+            }
+        }
+        LedgerEntryData::ContractData(contract_data) => {
+            if !matches!(contract_data.contract, ScAddress::Contract(_)) {
+                return None;
+            }
+            let asset = match contract_data.contract.clone() {
+                ScAddress::Contract(contract_id) => {
+                    stellar_asset_contract_ids.get(&contract_id).cloned()
+                }
+                _ => None,
+            };
+            let Some(asset) = asset else {
+                return None;
+            };
+
+            let address = get_address_from_balance_key(&contract_data.key);
+            let event_diff = address
+                .as_ref()
+                .map(|addr| agg.consume_amount(addr, &asset))
+                .unwrap_or(0);
+            let entry_diff = contract_balance_amount(current) - contract_balance_amount(previous);
+            if entry_diff == event_diff {
+                return None;
+            }
+
+            if protocol_version == 23 {
+                return None;
+            }
+            return Some("ContractData diff does not match events".to_string());
+        }
+        _ => {}
+    }
+
+    None
+}
+
+fn check_authorization(
+    agg: &AggregatedEvents,
+    owner: &ScAddress,
+    asset: &Asset,
+    current: Option<&LedgerEntry>,
+    previous: Option<&LedgerEntry>,
+) -> bool {
+    let (current, previous) = match (current, previous) {
+        (Some(curr), Some(prev)) => (curr, prev),
+        _ => return true,
+    };
+    let (curr_auth, prev_auth) = match (&current.data, &previous.data) {
+        (LedgerEntryData::Trustline(curr), LedgerEntryData::Trustline(prev)) => {
+            (is_trustline_authorized(curr), is_trustline_authorized(prev))
+        }
+        _ => return true,
+    };
+
+    let event_auth = agg
+        .is_authorized
+        .get(owner)
+        .and_then(|asset_map| asset_map.get(asset))
+        .and_then(|value| *value);
+
+    if let Some(event_auth) = event_auth {
+        if event_auth != curr_auth {
+            return false;
+        }
+    }
+
+    if curr_auth != prev_auth {
+        return event_auth.is_some();
+    }
+
+    true
+}
+
+fn get_asset_from_event(event: &ContractEvent, network_id: &Hash256) -> Option<Asset> {
+    let contract_id = event.contract_id.as_ref()?;
+    let (topics, _) = match &event.body {
+        ContractEventBody::V0(ContractEventV0 { topics, data: _ }) => (topics, ()),
+    };
+    let asset_val = topics.last()?;
+    let asset_str = match asset_val {
+        ScVal::String(s) => std::str::from_utf8(s.0.as_vec().as_slice()).ok()?,
+        _ => return None,
+    };
+
+    let asset = if asset_str == "native" {
+        Asset::Native
+    } else {
+        let (code, issuer_str) = asset_str.split_once(':')?;
+        if issuer_str.is_empty() {
+            return None;
+        }
+        let issuer_pk = stellar_core_crypto::PublicKey::from_strkey(issuer_str).ok()?;
+        let issuer: AccountId = (&issuer_pk).into();
+        let code_bytes = code.as_bytes();
+        if code_bytes.len() <= 4 {
+            let mut buf = [0u8; 4];
+            buf[..code_bytes.len()].copy_from_slice(code_bytes);
+            Asset::CreditAlphanum4(AlphaNum4 {
+                asset_code: AssetCode4(buf),
+                issuer,
+            })
+        } else if code_bytes.len() <= 12 {
+            let mut buf = [0u8; 12];
+            buf[..code_bytes.len()].copy_from_slice(code_bytes);
+            Asset::CreditAlphanum12(AlphaNum12 {
+                asset_code: AssetCode12(buf),
+                issuer,
+            })
+        } else {
+            return None;
+        }
+    };
+
+    if !asset_valid(&asset) {
+        return None;
+    }
+
+    let expected = get_asset_contract_id(network_id, &asset)?;
+    if &expected != contract_id {
+        return None;
+    }
+    Some(asset)
+}
+
+fn get_asset_contract_id(network_id: &Hash256, asset: &Asset) -> Option<ContractId> {
+    let preimage = HashIdPreimage::ContractId(HashIdPreimageContractId {
+        network_id: Hash::from(*network_id),
+        contract_id_preimage: ContractIdPreimage::Asset(asset.clone()),
+    });
+    let hash = Hash256::hash_xdr(&preimage).ok()?;
+    Some(ContractId(Hash::from(hash)))
+}
+
+fn scval_symbol_string(val: &ScVal) -> Option<String> {
+    match val {
+        ScVal::Symbol(sym) => Some(String::from_utf8_lossy(sym.0.as_vec().as_slice()).into_owned()),
+        _ => None,
+    }
+}
+
+fn scval_address(val: &ScVal) -> Option<ScAddress> {
+    match val {
+        ScVal::Address(addr) => Some(addr.clone()),
+        _ => None,
+    }
+}
+
+fn get_amount_from_data(data: &ScVal) -> i128 {
+    match data {
+        ScVal::I128(parts) => i128_from_parts(parts),
+        ScVal::Map(Some(map)) => {
+            for entry in map.iter() {
+                if let ScVal::Symbol(sym) = &entry.key {
+                    if sym.0.as_vec().as_slice() == b"amount" {
+                        if let ScVal::I128(parts) = &entry.val {
+                            return i128_from_parts(parts);
+                        }
+                    }
+                }
+            }
+            0
+        }
+        _ => 0,
+    }
+}
+
+fn get_address_from_balance_key(key: &ScVal) -> Option<ScAddress> {
+    let ScVal::Vec(Some(vec)) = key else {
+        return None;
+    };
+    if vec.len() != 2 {
+        return None;
+    }
+    scval_address(&vec[1])
+}
+
+fn contract_balance_amount(entry: Option<&LedgerEntry>) -> i128 {
+    let Some(entry) = entry else {
+        return 0;
+    };
+    let LedgerEntryData::ContractData(contract_data) = &entry.data else {
+        return 0;
+    };
+    let ScVal::Vec(Some(vec)) = &contract_data.key else {
+        return 0;
+    };
+    if vec.len() != 2 {
+        return 0;
+    }
+    match &vec[0] {
+        ScVal::Symbol(sym) if sym.0.as_vec().as_slice() == b"Balance" => {}
+        _ => return 0,
+    }
+    match &contract_data.val {
+        ScVal::Map(Some(map)) if !map.is_empty() => {
+            let entry = &map[0];
+            get_amount_from_data(&entry.val)
+        }
+        _ => 0,
+    }
+}
+
+fn i128_from_parts(parts: &stellar_xdr::curr::Int128Parts) -> i128 {
+    (i128::from(parts.hi) << 64) | i128::from(parts.lo)
+}
+
+
 fn update_changed_sponsorship_counts(
     change: &LedgerEntryChange,
     num_sponsoring: &mut HashMap<AccountId, i64>,
@@ -2076,10 +2644,12 @@ mod tests {
         AssetCode4, BytesM,
         ClaimableBalanceEntry, ClaimableBalanceEntryExt, ClaimableBalanceEntryExtensionV1,
         ClaimableBalanceFlags, ClaimableBalanceId, ClaimPredicate, Claimant, ClaimantV0,
-        ContractCodeEntry, ContractCodeEntryExt, DataEntry, DataEntryExt, Hash, LedgerEntryExt,
-        LedgerEntryExtensionV1, LedgerEntryExtensionV1Ext, LedgerHeaderExt,
-        LiquidityPoolConstantProductParameters, LiquidityPoolEntry, LiquidityPoolEntryBody,
-        LiquidityPoolEntryConstantProduct, OfferEntryFlags, PoolId, Price, PublicKey,
+        ContractCodeEntry, ContractCodeEntryExt, ContractEvent, ContractEventBody,
+        ContractEventType, ContractEventV0, DataEntry, DataEntryExt, ExtensionPoint, Hash,
+        Int128Parts, LedgerEntryExt, LedgerEntryExtensionV1, LedgerEntryExtensionV1Ext,
+        LedgerHeaderExt, LiquidityPoolConstantProductParameters, LiquidityPoolEntry,
+        LiquidityPoolEntryBody, LiquidityPoolEntryConstantProduct, OfferEntryFlags, PoolId,
+        Price, PublicKey, ScAddress, ScVal,
         SequenceNumber, Signer, SignerKey, SponsorshipDescriptor, StellarValue, StellarValueExt,
         Thresholds, TimePoint, TrustLineAsset, TrustLineEntry, TrustLineEntryExt,
         TrustLineEntryExtensionV2, TrustLineEntryExtensionV2Ext, TrustLineEntryV1,
@@ -2449,6 +3019,7 @@ mod tests {
             total_coins_delta: 0,
             changes,
             full_entries: None,
+            op_events: None,
         };
         ctx
     }
@@ -2530,6 +3101,56 @@ mod tests {
         manager.add(FailingStrict);
 
         assert!(manager.check_all(&ctx).is_err());
+    }
+
+    #[test]
+    fn test_events_are_consistent_with_entry_diffs_accepts_matching_balance() {
+        let prev = make_header(1, Hash256::ZERO);
+        let curr = make_header(2, Hash256::ZERO);
+        let network_id = stellar_core_common::NetworkId::testnet();
+
+        let previous = make_account_entry_with_ext(1, Vec::new(), 0, Vec::new(), 0, AccountEntryExt::V0);
+        let mut current = previous.clone();
+        if let LedgerEntryData::Account(account) = &mut current.data {
+            account.balance += 10;
+        }
+
+        let changes = vec![LedgerEntryChange::Updated { previous, current }];
+
+        let contract_id = get_asset_contract_id(&network_id.0, &Asset::Native).unwrap();
+        let topics: VecM<ScVal> = vec![
+            ScVal::Symbol("mint".try_into().unwrap()),
+            ScVal::Address(ScAddress::Account(make_account_id(1))),
+            ScVal::String(stellar_xdr::curr::ScString(
+                stellar_xdr::curr::StringM::try_from("native").unwrap(),
+            )),
+        ]
+        .try_into()
+        .unwrap();
+        let event = ContractEvent {
+            ext: ExtensionPoint::V0,
+            contract_id: Some(contract_id),
+            type_: ContractEventType::Contract,
+            body: ContractEventBody::V0(ContractEventV0 {
+                topics,
+                data: ScVal::I128(Int128Parts { hi: 0, lo: 10 }),
+            }),
+        };
+        let events = vec![event];
+
+        let ctx = InvariantContext {
+            prev_header: &prev,
+            curr_header: &curr,
+            bucket_list_hash: Hash256::ZERO,
+            fee_pool_delta: 0,
+            total_coins_delta: 0,
+            changes: &changes,
+            full_entries: None,
+            op_events: Some(&events),
+        };
+
+        let inv = EventsAreConsistentWithEntryDiffs::new(network_id.0);
+        assert!(inv.check(&ctx).is_ok());
     }
 
     #[test]

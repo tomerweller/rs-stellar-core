@@ -6,6 +6,11 @@
 use std::collections::{HashMap, HashSet};
 
 use stellar_core_common::{Hash256, NetworkId};
+use stellar_core_invariant::{
+    ConstantProductInvariant, EventsAreConsistentWithEntryDiffs, InvariantContext, InvariantManager,
+    LedgerEntryChange as InvariantLedgerEntryChange, LiabilitiesMatchOffers,
+    OrderBookIsNotCrossed,
+};
 use stellar_core_tx::{
     soroban::SorobanConfig,
     validation::{self, LedgerContext as ValidationContext},
@@ -13,7 +18,7 @@ use stellar_core_tx::{
 };
 use stellar_xdr::curr::{
     AccountEntry, AccountId, ConfigSettingEntry, ConfigSettingId, ContractCostParams,
-    DataEntry, LedgerEntry, LedgerEntryData, LedgerEntryExt,
+    DataEntry, LedgerEntry, LedgerEntryData, LedgerEntryExt, LedgerHeader,
     ContractEvent, DiagnosticEvent, ExtensionPoint, LedgerEntryChange, LedgerEntryChanges,
     TransactionEvent, TransactionEventStage,
     LedgerKey, LedgerKeyConfigSetting, OfferEntry, OperationBody, OperationMeta, OperationMetaV2,
@@ -188,6 +193,8 @@ pub struct TransactionExecutor {
     loaded_accounts: HashMap<[u8; 32], bool>,
     /// Soroban network configuration for contract execution.
     soroban_config: SorobanConfig,
+    /// Optional operation-level invariants runner.
+    op_invariants: Option<OperationInvariantRunner>,
 }
 
 impl TransactionExecutor {
@@ -201,6 +208,7 @@ impl TransactionExecutor {
         network_id: NetworkId,
         id_pool: u64,
         soroban_config: SorobanConfig,
+        op_invariants: Option<OperationInvariantRunner>,
     ) -> Self {
         let mut state = LedgerStateManager::new(base_reserve as i64, ledger_seq);
         state.set_id_pool(id_pool);
@@ -214,6 +222,7 @@ impl TransactionExecutor {
             state,
             loaded_accounts: HashMap::new(),
             soroban_config,
+            op_invariants,
         }
     }
 
@@ -830,6 +839,10 @@ impl TransactionExecutor {
         let mut soroban_return_value = None;
         let mut all_success = true;
         let mut failure = None;
+        let op_invariant_snapshot = self
+            .op_invariants
+            .as_ref()
+            .map(|runner| runner.snapshot());
 
         let tx_seq = frame.sequence_number();
         for (op_index, op) in frame.operations().iter().enumerate() {
@@ -870,11 +883,22 @@ impl TransactionExecutor {
                     }
                     operation_results.push(op_result);
 
+                    let op_delta_after = delta_snapshot(&self.state);
+                    let (created, updated, deleted) =
+                        delta_changes_between(self.state.delta(), op_delta_before, op_delta_after);
+                    let op_changes_local = build_entry_changes(&created, &updated, &deleted);
+
+                    if let Some(runner) = self.op_invariants.as_mut() {
+                        let op_event_slice = op_exec
+                            .soroban_meta
+                            .as_ref()
+                            .map(|meta| meta.events.as_slice())
+                            .unwrap_or(&[]);
+                        runner.apply_and_check(&op_changes_local, op_event_slice)?;
+                    }
+
                     if all_success {
-                        let op_delta_after = delta_snapshot(&self.state);
-                        let (created, updated, deleted) =
-                            delta_changes_between(self.state.delta(), op_delta_before, op_delta_after);
-                        op_changes.push(build_entry_changes(&created, &updated, &deleted));
+                        op_changes.push(op_changes_local);
 
                         if let Some(meta) = op_exec.soroban_meta {
                             op_events.push(meta.events.clone());
@@ -922,6 +946,11 @@ impl TransactionExecutor {
             );
             self.state.rollback();
             restore_delta_entries(&mut self.state, &fee_created, &fee_updated, &fee_deleted);
+            if let (Some(runner), Some(snapshot)) =
+                (self.op_invariants.as_mut(), op_invariant_snapshot)
+            {
+                runner.restore(snapshot);
+            }
             op_changes = vec![empty_entry_changes(); frame.operations().len()];
             op_events = vec![Vec::new(); frame.operations().len()];
             diagnostic_events.clear();
@@ -1144,6 +1173,93 @@ fn restore_delta_entries(
     }
     for key in deleted {
         delta.record_delete(key.clone());
+    }
+}
+
+pub struct OperationInvariantRunner {
+    manager: InvariantManager,
+    entries: HashMap<Vec<u8>, LedgerEntry>,
+    header: LedgerHeader,
+}
+
+impl OperationInvariantRunner {
+    pub fn new(entries: Vec<LedgerEntry>, header: LedgerHeader, network_id: NetworkId) -> Result<Self> {
+        let mut manager = InvariantManager::new();
+        manager.add(LiabilitiesMatchOffers);
+        manager.add(OrderBookIsNotCrossed);
+        manager.add(ConstantProductInvariant);
+        manager.add(EventsAreConsistentWithEntryDiffs::new(network_id.0));
+
+        let mut map = HashMap::new();
+        for entry in entries {
+            let key = crate::delta::entry_to_key(&entry)?;
+            let key_bytes = key.to_xdr(Limits::none())?;
+            map.insert(key_bytes, entry);
+        }
+
+        Ok(Self {
+            manager,
+            entries: map,
+            header,
+        })
+    }
+
+    fn snapshot(&self) -> HashMap<Vec<u8>, LedgerEntry> {
+        self.entries.clone()
+    }
+
+    fn restore(&mut self, snapshot: HashMap<Vec<u8>, LedgerEntry>) {
+        self.entries = snapshot;
+    }
+
+    fn apply_and_check(&mut self, changes: &LedgerEntryChanges, op_events: &[ContractEvent]) -> Result<()> {
+        let mut invariant_changes = Vec::new();
+        for change in changes.0.iter() {
+            match change {
+                LedgerEntryChange::Created(entry)
+                | LedgerEntryChange::Updated(entry)
+                | LedgerEntryChange::State(entry)
+                | LedgerEntryChange::Restored(entry) => {
+                    let key = crate::delta::entry_to_key(entry)?;
+                    let key_bytes = key.to_xdr(Limits::none())?;
+                    let previous = self.entries.get(&key_bytes).cloned();
+                    self.entries.insert(key_bytes, entry.clone());
+                    match previous {
+                        Some(prev) => invariant_changes.push(InvariantLedgerEntryChange::Updated {
+                            previous: prev,
+                            current: entry.clone(),
+                        }),
+                        None => invariant_changes.push(InvariantLedgerEntryChange::Created {
+                            current: entry.clone(),
+                        }),
+                    }
+                }
+                LedgerEntryChange::Removed(key) => {
+                    let key_bytes = key.to_xdr(Limits::none())?;
+                    if let Some(previous) = self.entries.remove(&key_bytes) {
+                        invariant_changes.push(InvariantLedgerEntryChange::Deleted { previous });
+                    }
+                }
+            }
+        }
+
+        if invariant_changes.is_empty() {
+            return Ok(());
+        }
+
+        let entries: Vec<LedgerEntry> = self.entries.values().cloned().collect();
+        let ctx = InvariantContext {
+            prev_header: &self.header,
+            curr_header: &self.header,
+            bucket_list_hash: Hash256::ZERO,
+            fee_pool_delta: 0,
+            total_coins_delta: 0,
+            changes: &invariant_changes,
+            full_entries: Some(&entries),
+            op_events: Some(op_events),
+        };
+        self.manager.check_all(&ctx)?;
+        Ok(())
     }
 }
 
@@ -1664,6 +1780,7 @@ pub fn execute_transaction_set(
     delta: &mut LedgerDelta,
     soroban_config: SorobanConfig,
     soroban_base_prng_seed: [u8; 32],
+    op_invariants: Option<OperationInvariantRunner>,
 ) -> Result<(
     Vec<TransactionExecutionResult>,
     Vec<TransactionResultPair>,
@@ -1680,6 +1797,7 @@ pub fn execute_transaction_set(
         network_id,
         id_pool,
         soroban_config,
+        op_invariants,
     );
 
     let mut results = Vec::with_capacity(transactions.len());
@@ -1734,6 +1852,10 @@ pub fn execute_transaction_set(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stellar_xdr::curr::{
+        AccountId, Asset, AssetCode4, AlphaNum4, LedgerEntry, LedgerEntryData, LedgerEntryExt,
+        OfferEntry, OfferEntryExt, Price, PublicKey, Uint256, VecM, LedgerEntryChange,
+    };
 
     #[test]
     fn test_transaction_executor_creation() {
@@ -1746,9 +1868,69 @@ mod tests {
             NetworkId::testnet(),
             0,
             SorobanConfig::default(),
+            None,
         );
 
         assert_eq!(executor.ledger_seq, 100);
         assert_eq!(executor.close_time, 1234567890);
+    }
+
+    fn make_account_id(byte: u8) -> AccountId {
+        AccountId(PublicKey::PublicKeyTypeEd25519(Uint256([byte; 32])))
+    }
+
+    fn make_asset(code: &[u8; 4], issuer: u8) -> Asset {
+        Asset::CreditAlphanum4(AlphaNum4 {
+            asset_code: AssetCode4(*code),
+            issuer: make_account_id(issuer),
+        })
+    }
+
+    fn make_offer(
+        offer_id: i64,
+        selling: Asset,
+        buying: Asset,
+        price: Price,
+        flags: u32,
+    ) -> LedgerEntry {
+        LedgerEntry {
+            last_modified_ledger_seq: 1,
+            data: LedgerEntryData::Offer(OfferEntry {
+                seller_id: make_account_id(9),
+                offer_id,
+                selling,
+                buying,
+                amount: 100,
+                price,
+                flags,
+                ext: OfferEntryExt::V0,
+            }),
+            ext: LedgerEntryExt::V0,
+        }
+    }
+
+    #[test]
+    fn test_operation_invariant_runner_detects_crossed_order_book() {
+        let asset_a = make_asset(b"ABCD", 1);
+        let asset_b = make_asset(b"WXYZ", 2);
+
+        let ask = make_offer(1, asset_a.clone(), asset_b.clone(), Price { n: 1, d: 1 }, 0);
+        let bid = make_offer(2, asset_b.clone(), asset_a.clone(), Price { n: 1, d: 1 }, 0);
+
+        let runner = OperationInvariantRunner::new(
+            vec![ask],
+            LedgerHeader::default(),
+            NetworkId::testnet(),
+        )
+        .unwrap();
+        let mut runner = runner;
+
+        let changes = LedgerEntryChanges(
+            vec![LedgerEntryChange::Created(bid)]
+                .try_into()
+                .unwrap_or_default(),
+        );
+
+        assert!(runner.apply_and_check(&changes, &[]).is_err());
     }
 }

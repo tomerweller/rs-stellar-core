@@ -13,6 +13,10 @@ Invariant framework for validating ledger transitions.
   sponsorship count, account subentry count, constant product checks, order book
   crossed checks, and liabilities vs offer deltas.
 - Hooked into ledger close when enabled.
+- Operation-level checks for liabilities/order book/constant product are run during
+  transaction execution when invariants are enabled.
+- Operation-level event consistency checks for Soroban contract events are run
+  alongside other op-level invariants.
 
 ## Status
 
@@ -24,4 +28,5 @@ replay hooks, and metrics are still missing.
 Register invariants via `LedgerManager::add_invariant()` or add to the
 `InvariantManager` directly in tests. The `InvariantContext` includes
 header transitions, deltas, and entry changes (with previous/current data
-when available).
+when available). For operation-level checks, it can also carry the contract
+events emitted by the operation.

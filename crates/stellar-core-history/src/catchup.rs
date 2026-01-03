@@ -1350,6 +1350,7 @@ impl CatchupManager {
                     total_coins_delta: result.total_coins_delta,
                     changes: &result.changes,
                     full_entries: Some(&full_entries),
+                    op_events: None,
                 };
                 manager
                     .check_all(&ctx)
