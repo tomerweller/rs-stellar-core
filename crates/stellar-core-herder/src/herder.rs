@@ -27,12 +27,11 @@ use stellar_xdr::curr::{
 use crate::error::HerderError;
 use crate::pending::{PendingConfig, PendingEnvelopes, PendingResult};
 use crate::quorum_tracker::{QuorumTracker, SlotQuorumTracker};
-use crate::scp_driver::{HerderScpCallback, ScpDriver, ScpDriverConfig, ValueValidation};
+use crate::scp_driver::{HerderScpCallback, ScpDriver, ScpDriverConfig};
 use crate::state::HerderState;
 use crate::tx_queue::{
     account_key_from_account_id, TransactionQueue, TransactionSet, TxQueueConfig, TxQueueResult,
 };
-pub use crate::tx_queue::TransactionSet as TxSet;
 use crate::Result;
 
 /// Maximum slot distance for accepting EXTERNALIZE messages.

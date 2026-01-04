@@ -14,7 +14,7 @@ use stellar_core_common::{
 };
 use stellar_core_crypto::Sha256Hasher;
 use stellar_xdr::curr::{
-    AccountId, DecoratedSignature, FeeBumpTransactionInnerTx, GeneralizedTransactionSet, Hash,
+    AccountId, DecoratedSignature, FeeBumpTransactionInnerTx, GeneralizedTransactionSet,
     Limits, Preconditions, SignerKey, TransactionEnvelope, TransactionPhase, TxSetComponent,
 };
 use stellar_xdr::curr::WriteXdr;
@@ -235,6 +235,7 @@ pub(crate) fn fee_rate_cmp(a_fee: u64, a_ops: u32, b_fee: u64, b_ops: u32) -> Or
     left.cmp(&right)
 }
 
+#[allow(dead_code)]
 fn tx_size_bytes(envelope: &TransactionEnvelope) -> u32 {
     envelope
         .to_xdr(Limits::none())
@@ -1160,6 +1161,7 @@ impl TransactionQueue {
         (tx_set, gen_tx_set)
     }
 
+    #[allow(dead_code)]
     fn select_transactions(&self, max_ops: usize) -> SelectedTxs {
         self.select_transactions_with_starting_seq(max_ops, None)
     }

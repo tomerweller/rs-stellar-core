@@ -10,9 +10,8 @@ use crate::{
     codec::helpers,
     connection::{ConnectionPool, Listener},
     flood::{compute_message_hash, FloodGate, FloodGateStats},
-    peer::{Peer, PeerInfo, PeerState, PeerStatsSnapshot},
-    LocalNode, MessageHandler, OverlayConfig, OverlayError, PeerAddress, PeerEvent, PeerId,
-    PeerType, Result,
+    peer::{Peer, PeerInfo, PeerStatsSnapshot},
+    LocalNode, OverlayConfig, OverlayError, PeerAddress, PeerEvent, PeerId, PeerType, Result,
 };
 use dashmap::DashMap;
 use std::collections::{HashMap, HashSet};

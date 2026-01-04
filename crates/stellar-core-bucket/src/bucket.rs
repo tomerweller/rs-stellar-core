@@ -18,7 +18,6 @@ use std::sync::Arc;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use sha2::Sha256;
 use stellar_xdr::curr::{LedgerEntry, LedgerKey, ReadXdr, WriteXdr, Limits};
 
 use stellar_core_common::Hash256;

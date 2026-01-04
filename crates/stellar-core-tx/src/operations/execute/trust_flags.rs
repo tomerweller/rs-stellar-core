@@ -7,8 +7,7 @@
 use stellar_xdr::curr::{
     AccountId, AllowTrustOp, AllowTrustResult, AllowTrustResultCode, Asset, Liabilities,
     OperationResult, OperationResultTr, SetTrustLineFlagsOp, SetTrustLineFlagsResult,
-    SetTrustLineFlagsResultCode, TrustLineEntry, TrustLineEntryExt, TrustLineEntryV1,
-    TrustLineEntryV1Ext, TrustLineFlags,
+    SetTrustLineFlagsResultCode, TrustLineEntry, TrustLineEntryExt, TrustLineFlags,
 };
 
 use crate::state::LedgerStateManager;
@@ -19,6 +18,7 @@ use crate::Result;
 const AUTHORIZED_FLAG: u32 = TrustLineFlags::AuthorizedFlag as u32;
 const AUTHORIZED_TO_MAINTAIN_LIABILITIES_FLAG: u32 =
     TrustLineFlags::AuthorizedToMaintainLiabilitiesFlag as u32;
+#[allow(dead_code)]
 const TRUSTLINE_CLAWBACK_ENABLED_FLAG: u32 = TrustLineFlags::TrustlineClawbackEnabledFlag as u32;
 const AUTH_REQUIRED_FLAG: u32 = 0x1;
 
@@ -316,7 +316,7 @@ mod tests {
         state.create_account(create_test_account(issuer_id.clone(), 100_000_000, AUTH_REQUIRED_FLAG));
         state.create_account(create_test_account(trustor_id.clone(), 100_000_000, 0));
 
-        let asset = Asset::CreditAlphanum4(AlphaNum4 {
+        let _asset = Asset::CreditAlphanum4(AlphaNum4 {
             asset_code: AssetCode4([b'U', b'S', b'D', b'C']),
             issuer: issuer_id.clone(),
         });

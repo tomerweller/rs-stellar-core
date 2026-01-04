@@ -740,7 +740,7 @@ mod tests {
         let entry = &merged.entries()[0];
         assert!(entry.is_init(), "INIT + LIVE should preserve INIT status");
 
-        let key = make_account_key([1u8; 32]);
+        let _key = make_account_key([1u8; 32]);
         if let BucketEntry::Init(ledger_entry) = entry {
             if let LedgerEntryData::Account(account) = &ledger_entry.data {
                 assert_eq!(account.balance, 200, "Should have new value");

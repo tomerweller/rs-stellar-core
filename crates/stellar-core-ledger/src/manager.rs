@@ -20,7 +20,6 @@ use std::sync::Arc;
 use stellar_core_bucket::{BucketList, BucketManager};
 use stellar_core_common::{Hash256, NetworkId};
 use stellar_core_db::Database;
-use stellar_core_tx::soroban::SorobanConfig;
 use stellar_core_invariant::{
     AccountSubEntriesCountIsValid, BucketListHashMatchesHeader, CloseTimeNondecreasing,
     ConservationOfLumens, ConstantProductInvariant, Invariant, InvariantContext, InvariantManager,
@@ -35,7 +34,7 @@ use stellar_xdr::curr::{
     TransactionPhase, TransactionResultMetaV1, TransactionSetV1, TxSetComponent,
     TxSetComponentTxsMaybeDiscountedFee, UpgradeEntryMeta, VecM, WriteXdr,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Configuration for the LedgerManager.
 #[derive(Debug, Clone)]
@@ -95,6 +94,7 @@ pub struct LedgerManager {
     db: Database,
 
     /// Bucket manager for bucket list operations.
+    #[allow(dead_code)]
     bucket_manager: Arc<BucketManager>,
 
     /// Bucket list for ledger state (wrapped in Arc for sharing with snapshots).
@@ -445,7 +445,7 @@ impl LedgerManager {
     pub fn apply_ledger(
         &self,
         header: LedgerHeader,
-        tx_set: TransactionSetVariant,
+        _tx_set: TransactionSetVariant,
         _results: Vec<stellar_xdr::curr::TransactionResultPair>,
     ) -> Result<LedgerCloseResult> {
         let state = self.state.read();
@@ -498,7 +498,7 @@ impl LedgerManager {
     ///
     /// Returns a LedgerCloseContext for applying transactions and
     /// committing the ledger.
-    pub fn begin_close(&self, close_data: LedgerCloseData) -> Result<LedgerCloseContext> {
+    pub fn begin_close(&self, close_data: LedgerCloseData) -> Result<LedgerCloseContext<'_>> {
         let state = self.state.read();
         if !state.initialized {
             return Err(LedgerError::NotInitialized);
@@ -1090,7 +1090,6 @@ fn extract_scp_timing(entry: &LedgerEntry) -> Option<ConfigSettingScpTiming> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     // Note: These tests require proper mocking of BucketManager and Database
     // For now they are placeholder tests

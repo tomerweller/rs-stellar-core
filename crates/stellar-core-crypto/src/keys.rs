@@ -49,6 +49,7 @@ impl PublicKey {
     }
 
     /// Get the inner verifying key.
+    #[allow(dead_code)]
     pub(crate) fn inner(&self) -> &VerifyingKey {
         &self.0
     }

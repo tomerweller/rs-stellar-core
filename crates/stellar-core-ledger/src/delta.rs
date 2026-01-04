@@ -118,7 +118,6 @@ pub fn entry_to_key(entry: &LedgerEntry) -> Result<LedgerKey> {
             })
         }
         LedgerEntryData::ConfigSetting(setting) => {
-            use stellar_xdr::curr::Discriminant;
             LedgerKey::ConfigSetting(stellar_xdr::curr::LedgerKeyConfigSetting {
                 config_setting_id: setting.discriminant(),
             })

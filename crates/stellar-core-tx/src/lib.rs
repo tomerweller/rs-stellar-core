@@ -239,6 +239,7 @@ impl TransactionValidator {
 /// Executes transactions and produces results.
 pub struct TransactionExecutor {
     /// Context for execution.
+    #[allow(dead_code)]
     context: ApplyContext,
 }
 
@@ -254,7 +255,7 @@ impl TransactionExecutor {
     /// a state reader. This method returns an error indicating state is required.
     pub fn execute(
         &self,
-        tx: &stellar_xdr::curr::TransactionEnvelope,
+        _tx: &stellar_xdr::curr::TransactionEnvelope,
         _delta: &mut LedgerDelta,
     ) -> Result<TxApplyResult> {
         // Full execution requires a state reader - use execute_with_state for live execution

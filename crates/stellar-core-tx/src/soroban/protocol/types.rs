@@ -1,6 +1,6 @@
 //! Shared types for protocol-versioned host implementations.
 
-use stellar_xdr::curr::{ContractEvent, Hash, LedgerEntry, LedgerKey, ScVal};
+use stellar_xdr::curr::{ContractEvent, LedgerEntry, LedgerKey, ScVal};
 
 /// Output from invoking a Soroban host function.
 #[derive(Debug, Clone)]

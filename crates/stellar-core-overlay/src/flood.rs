@@ -7,7 +7,6 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use stellar_core_common::Hash256;
 use stellar_xdr::curr::StellarMessage;

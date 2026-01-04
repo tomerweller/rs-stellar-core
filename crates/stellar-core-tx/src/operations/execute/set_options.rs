@@ -337,7 +337,7 @@ pub fn execute_set_options(
         }
     }
 
-    drop(source_account_mut);
+    let _ = source_account_mut;
     if let Some((sponsor_id, delta)) = sponsor_delta {
         state.update_num_sponsoring(&sponsor_id, delta)?;
     }

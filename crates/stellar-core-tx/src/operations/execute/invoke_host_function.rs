@@ -4,11 +4,10 @@
 //! which executes Soroban smart contract functions.
 
 use stellar_xdr::curr::{
-    AccountId, ContractCodeEntry, ContractCodeEntryExt, ContractDataDurability, ContractEvent,
-    ContractEventType, DiagnosticEvent, Hash, HostFunction, InvokeHostFunctionOp,
-    InvokeHostFunctionResult, InvokeHostFunctionResultCode, InvokeHostFunctionSuccessPreImage,
-    LedgerKey, LedgerKeyContractCode, LedgerKeyContractData, Limits, OperationResult,
-    OperationResultTr, ScAddress, ScVal, SorobanTransactionData, TtlEntry, VecM, WriteXdr,
+    AccountId, ContractCodeEntry, ContractCodeEntryExt, ContractEvent, DiagnosticEvent, Hash,
+    HostFunction, InvokeHostFunctionOp, InvokeHostFunctionResult, InvokeHostFunctionResultCode,
+    InvokeHostFunctionSuccessPreImage, LedgerKey, LedgerKeyContractCode, Limits, OperationResult,
+    OperationResultTr, ScVal, SorobanTransactionData, TtlEntry, WriteXdr,
 };
 
 use crate::soroban::SorobanConfig;
@@ -84,7 +83,6 @@ fn execute_contract_invocation(
     soroban_config: &SorobanConfig,
 ) -> Result<OperationExecutionResult> {
     use crate::soroban::execute_host_function;
-    use sha2::{Digest, Sha256};
 
     // Convert auth entries to a slice
     let auth_entries: Vec<_> = op.auth.iter().cloned().collect();

@@ -421,7 +421,7 @@ async fn cmd_new_db(
 async fn cmd_upgrade_db(config: AppConfig) -> anyhow::Result<()> {
     tracing::info!(path = ?config.database.path, "Upgrading database schema");
 
-    let db = stellar_core_db::Database::open(&config.database.path)?;
+    let _db = stellar_core_db::Database::open(&config.database.path)?;
 
     // Database initialization already applies the latest schema
     // In a full implementation, this would run migrations

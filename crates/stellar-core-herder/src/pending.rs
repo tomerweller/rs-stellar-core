@@ -10,8 +10,7 @@ use parking_lot::RwLock;
 use stellar_core_common::Hash256;
 use stellar_core_scp::SlotIndex;
 use stellar_xdr::curr::ScpEnvelope;
-use std::collections::{BTreeMap, VecDeque};
-use std::sync::Arc;
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 /// Configuration for pending envelope management.
@@ -335,8 +334,8 @@ impl Default for PendingEnvelopes {
 mod tests {
     use super::*;
     use stellar_xdr::curr::{
-        ScpEnvelope, ScpStatement, ScpStatementType, ScpNomination, ScpStatementPledges,
-        NodeId as XdrNodeId, PublicKey, Uint256, Uint64, Hash, Value,
+        ScpEnvelope, ScpStatement, ScpNomination, ScpStatementPledges, NodeId as XdrNodeId,
+        PublicKey, Uint256, Hash,
     };
 
     fn make_test_envelope(slot: SlotIndex) -> ScpEnvelope {

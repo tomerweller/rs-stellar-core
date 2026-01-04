@@ -305,7 +305,6 @@ impl DiskBucket {
     /// This reads from disk sequentially.
     pub fn iter(&self) -> Result<DiskBucketIter> {
         let file = File::open(&self.file_path)?;
-        let file_len = file.metadata()?.len();
         let reader = BufReader::new(file);
 
         // Read file to check format

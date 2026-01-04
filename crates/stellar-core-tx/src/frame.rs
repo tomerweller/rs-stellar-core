@@ -8,8 +8,8 @@ use stellar_xdr::curr::{
     InvokeHostFunctionOp, LedgerKey, Memo,
     MuxedAccount, Operation, OperationBody, Preconditions, SorobanTransactionData,
     SorobanTransactionDataExt, Transaction, TransactionEnvelope, TransactionExt,
-    TransactionSignaturePayload, TransactionSignaturePayloadTaggedTransaction,
-    TransactionV1Envelope, Uint256, VecM, WriteXdr,
+    TransactionSignaturePayload, TransactionSignaturePayloadTaggedTransaction, Uint256, VecM,
+    WriteXdr,
 };
 use stellar_xdr::curr::Limits;
 

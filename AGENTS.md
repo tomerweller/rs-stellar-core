@@ -20,6 +20,7 @@
 - Follow standard Rust style (4-space indentation, snake_case for functions and modules, CamelCase for types).
 - Keep modules small and focused; prefer adding logic inside the relevant crate instead of cross-crate helpers.
 - Use descriptive error messages and map to XDR result codes where applicable.
+- Fix cargo compiler warnings before submitting changes; keep the workspace warning-free where practical.
 
 ## Determinism & Parity
 

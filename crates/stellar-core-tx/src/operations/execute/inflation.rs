@@ -25,7 +25,7 @@ use crate::Result;
 pub fn execute_inflation(
     source: &AccountId,
     state: &mut LedgerStateManager,
-    context: &LedgerContext,
+    _context: &LedgerContext,
 ) -> Result<OperationResult> {
     // Check source account exists
     if state.get_account(source).is_none() {

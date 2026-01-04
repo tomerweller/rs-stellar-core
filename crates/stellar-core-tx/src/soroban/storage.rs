@@ -4,8 +4,8 @@
 //! our LedgerStateManager.
 
 use stellar_xdr::curr::{
-    ContractDataDurability, ContractDataEntry, Hash, LedgerKey, LedgerKeyContractCode,
-    LedgerKeyContractData, ScAddress, ScVal, WriteXdr,
+    ContractDataDurability, ContractDataEntry, Hash, LedgerKey, LedgerKeyContractData, ScAddress,
+    ScVal, WriteXdr,
 };
 
 /// A storage key for contract data.
@@ -216,6 +216,7 @@ impl SorobanStorage {
 
 /// Footprint tracking for Soroban transactions.
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct Footprint {
     /// Keys that are read-only.
     pub read_only: Vec<LedgerKey>,
@@ -223,6 +224,7 @@ pub struct Footprint {
     pub read_write: Vec<LedgerKey>,
 }
 
+#[allow(dead_code)]
 impl Footprint {
     /// Create a new footprint.
     pub fn new() -> Self {
@@ -275,7 +277,7 @@ impl Footprint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stellar_xdr::curr::{ContractId, Uint256};
+    use stellar_xdr::curr::{ContractId, LedgerKeyContractCode};
 
     fn make_contract_address(seed: u8) -> ScAddress {
         ScAddress::Contract(ContractId(Hash([seed; 32])))

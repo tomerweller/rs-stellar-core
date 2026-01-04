@@ -8,12 +8,12 @@ use stellar_xdr::curr::{
     AccountEntry, LedgerEntry, LedgerEntryChange, LedgerEntryChanges, LedgerEntryData, LedgerKey,
     LedgerKeyAccount, LedgerKeyClaimableBalance, LedgerKeyContractCode, LedgerKeyContractData,
     LedgerKeyData, LedgerKeyLiquidityPool, LedgerKeyOffer, LedgerKeyTrustLine, LedgerKeyTtl,
-    TransactionMeta, TransactionResult, TrustLineEntry,
+    TransactionMeta, TransactionResult,
 };
 
 use crate::frame::TransactionFrame;
 use crate::result::{TxApplyResult, TxResultWrapper};
-use crate::{Result, TxError};
+use crate::Result;
 
 /// Delta type alias for state changes.
 #[derive(Clone)]

@@ -11,7 +11,6 @@ use stellar_xdr::curr::{
 };
 
 use crate::frame::TransactionFrame;
-use crate::{Result, TxError};
 
 /// Ledger context for validation.
 pub struct LedgerContext {
@@ -613,7 +612,7 @@ fn has_signed_payload_signature(
 /// Note: This only checks the signature format/validity, not whether
 /// the signer has authority over the account.
 fn is_valid_signature(
-    tx_hash: &stellar_core_common::Hash256,
+    _tx_hash: &stellar_core_common::Hash256,
     sig: &DecoratedSignature,
 ) -> bool {
     // The signature should be 64 bytes for Ed25519
@@ -657,10 +656,10 @@ mod tests {
         AccountEntry, AccountEntryExt, AccountId, Asset, ContractDataDurability, ContractId,
         DecoratedSignature, Duration, Hash, HostFunction, InvokeContractArgs, InvokeHostFunctionOp,
         LedgerFootprint, LedgerKey, LedgerKeyContractData, ManageDataOp, Memo, MuxedAccount,
-        Operation, OperationBody, PaymentOp, Preconditions, PreconditionsV2, PublicKey as XdrPublicKey,
-        ScAddress, ScSymbol, ScVal, SequenceNumber, Signature as XdrSignature, SignatureHint,
+        Operation, OperationBody, PaymentOp, Preconditions, PreconditionsV2, ScAddress, ScSymbol,
+        ScVal, SequenceNumber, Signature as XdrSignature, SignatureHint,
         SorobanResources, SorobanResourcesExtV0, SorobanTransactionData, SorobanTransactionDataExt,
-        String32, String64, StringM, Thresholds, TimeBounds, TimePoint, Transaction,
+        String32, String64, StringM, Thresholds, Transaction,
         TransactionEnvelope, TransactionExt, TransactionV1Envelope, Uint256, VecM,
     };
 

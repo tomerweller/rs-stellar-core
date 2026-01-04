@@ -6,7 +6,7 @@
 use std::cmp::Ordering;
 
 use stellar_xdr::curr::{
-    BucketEntry as XdrBucketEntry, BucketEntryType, BucketMetadata, LedgerEntry, LedgerEntryData,
+    BucketEntry as XdrBucketEntry, BucketEntryType, BucketMetadata, LedgerEntry,
     LedgerKey, ReadXdr, WriteXdr, Limits,
 };
 

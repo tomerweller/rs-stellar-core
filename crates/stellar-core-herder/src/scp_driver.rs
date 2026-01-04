@@ -109,6 +109,7 @@ pub struct PendingTxSet {
 
 /// Pending quorum set request.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PendingQuorumSet {
     /// The hash of the quorum set.
     pub hash: Hash256,
@@ -408,7 +409,7 @@ impl ScpDriver {
     /// Validate an SCP value.
     ///
     /// The value is the XDR-encoded StellarValue.
-    pub fn validate_value_impl(&self, slot: SlotIndex, value: &Value) -> ValueValidation {
+    pub fn validate_value_impl(&self, _slot: SlotIndex, value: &Value) -> ValueValidation {
         // Decode the StellarValue
         let stellar_value = match StellarValue::from_xdr(value, stellar_xdr::curr::Limits::none()) {
             Ok(v) => v,
@@ -882,7 +883,6 @@ impl SCPDriver for HerderScpCallback {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stellar_core_common::NetworkId;
     use stellar_xdr::curr::{Limits, StellarValue, StellarValueExt, TimePoint, UpgradeType, VecM};
 
     fn make_test_driver() -> ScpDriver {

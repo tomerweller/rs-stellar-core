@@ -3,7 +3,7 @@
 //! Represents a connected and authenticated peer with message send/receive.
 
 use crate::{
-    auth::{AuthContext, AuthState},
+    auth::AuthContext,
     codec::helpers,
     connection::{Connection, ConnectionDirection},
     LocalNode, OverlayError, PeerAddress, PeerId, Result,
@@ -11,7 +11,7 @@ use crate::{
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use stellar_xdr::curr::{Auth, Hello, StellarMessage};
 use tokio::sync::mpsc;
 use tracing::{debug, info, trace, warn};
@@ -151,6 +151,7 @@ pub struct Peer {
     /// Statistics.
     stats: Arc<PeerStats>,
     /// Channel for sending messages (used by split peer).
+    #[allow(dead_code)]
     send_tx: Option<mpsc::Sender<StellarMessage>>,
 }
 

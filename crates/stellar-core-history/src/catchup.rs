@@ -24,7 +24,6 @@ use crate::{
     archive::HistoryArchive,
     archive_state::HistoryArchiveState,
     checkpoint,
-    paths::CHECKPOINT_FREQUENCY,
     replay::{self, LedgerReplayResult, ReplayConfig, ReplayedLedgerState},
     verify, CatchupOutput, CatchupResult, HistoryError, Result,
 };
@@ -622,6 +621,7 @@ impl CatchupManager {
     }
 
     /// Download a single bucket.
+    #[allow(dead_code)]
     async fn download_bucket(&self, hash: &Hash256) -> Result<Vec<u8>> {
         for archive in &self.archives {
             match archive.get_bucket(hash).await {

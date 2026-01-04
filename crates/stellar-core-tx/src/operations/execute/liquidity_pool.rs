@@ -8,7 +8,7 @@ use stellar_xdr::curr::{
     AccountId, Asset, LiquidityPoolDepositOp, LiquidityPoolDepositResult,
     LiquidityPoolDepositResultCode, LiquidityPoolWithdrawOp,
     LiquidityPoolWithdrawResult, LiquidityPoolWithdrawResultCode, OperationResult,
-    OperationResultTr, PoolId, Price, TrustLineAsset, TrustLineFlags,
+    OperationResultTr, Price, TrustLineAsset, TrustLineFlags,
 };
 
 use crate::state::LedgerStateManager;
@@ -256,7 +256,7 @@ pub fn execute_liquidity_pool_withdraw(
     op: &LiquidityPoolWithdrawOp,
     source: &AccountId,
     state: &mut LedgerStateManager,
-    context: &LedgerContext,
+    _context: &LedgerContext,
 ) -> Result<OperationResult> {
     // Validate amounts
     if op.amount <= 0 {

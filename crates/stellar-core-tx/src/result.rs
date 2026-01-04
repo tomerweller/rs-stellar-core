@@ -4,8 +4,8 @@
 //! handling and inspection.
 
 use stellar_xdr::curr::{
-    InnerTransactionResult, InnerTransactionResultResult, OperationResult, OperationResultTr,
-    TransactionResult, TransactionResultResult,
+    InnerTransactionResultResult, OperationResult, OperationResultTr, TransactionResult,
+    TransactionResultResult,
 };
 
 /// Result of applying a transaction.

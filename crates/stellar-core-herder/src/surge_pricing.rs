@@ -17,6 +17,7 @@ pub(crate) const DEX_LANE: usize = 1;
 pub(crate) trait SurgePricingLaneConfig {
     fn get_lane(&self, frame: &TransactionFrame) -> usize;
     fn lane_limits(&self) -> &[Resource];
+    #[allow(dead_code)]
     fn update_generic_lane_limit(&mut self, limit: Resource);
     fn tx_resources(&self, frame: &TransactionFrame, ledger_version: u32) -> Resource;
 }
@@ -181,6 +182,7 @@ impl Ord for QueueEntry {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VisitTxResult {
     Skipped,
@@ -196,6 +198,7 @@ pub(crate) struct SurgePricingPriorityQueue {
     seed: u64,
 }
 
+#[allow(dead_code)]
 impl SurgePricingPriorityQueue {
     pub(crate) fn new(
         lane_config: Box<dyn SurgePricingLaneConfig>,

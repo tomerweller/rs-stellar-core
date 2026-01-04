@@ -5,7 +5,7 @@
 
 use crate::{DbError, Result};
 use rusqlite::Connection;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Current schema version.
 pub const CURRENT_VERSION: i32 = 5;

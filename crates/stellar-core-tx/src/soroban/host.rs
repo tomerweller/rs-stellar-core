@@ -10,19 +10,19 @@ use sha2::{Digest, Sha256};
 // Use soroban-env-host types for Host interaction
 use soroban_env_host::{
     budget::Budget,
-    e2e_invoke::{self, InvokeHostFunctionResult},
+    e2e_invoke::{self},
     fees::{compute_rent_fee, LedgerEntryRentChange},
     events::Events,
-    storage::{AccessType, EntryWithLiveUntil, Footprint, FootprintMap, SnapshotSource, Storage, StorageMap},
-    DiagnosticLevel, Host, HostError, LedgerInfo,
+    storage::{AccessType, EntryWithLiveUntil, Footprint, FootprintMap, SnapshotSource, StorageMap},
+    HostError, LedgerInfo,
     xdr::DiagnosticEvent,
 };
 
 // Both soroban-env-host v25 and our code use stellar-xdr v25, so we can use types directly
 use stellar_xdr::curr::{
-    AccountId, ContractDataDurability, Hash, HostFunction, LedgerEntry, LedgerEntryData,
-    LedgerEntryExt, LedgerFootprint, LedgerKey, Limits, ReadXdr, ScAddress, ScVal,
-    SorobanAuthorizationEntry, SorobanTransactionData, SorobanTransactionDataExt, WriteXdr,
+    AccountId, Hash, HostFunction, LedgerEntry, LedgerEntryData, LedgerEntryExt, LedgerFootprint,
+    LedgerKey, Limits, ReadXdr, ScVal, SorobanAuthorizationEntry, SorobanTransactionData,
+    SorobanTransactionDataExt, WriteXdr,
 };
 
 use crate::state::LedgerStateManager;
@@ -177,6 +177,7 @@ fn compute_key_hash(key: &LedgerKey) -> Hash {
 }
 
 /// Build a Soroban storage footprint from transaction resources.
+#[allow(dead_code)]
 pub fn build_footprint(
     budget: &Budget,
     ledger_footprint: &LedgerFootprint,
@@ -197,6 +198,7 @@ pub fn build_footprint(
 }
 
 /// Build a storage map from the ledger state using the footprint.
+#[allow(dead_code)]
 pub fn build_storage_map(
     budget: &Budget,
     footprint: &Footprint,
@@ -338,19 +340,19 @@ pub fn execute_host_function(
 
     // Encode all data to XDR bytes for e2e_invoke
     let encoded_host_fn = host_function.to_xdr(Limits::none())
-        .map_err(|e| HostError::from(soroban_env_host::Error::from_type_and_code(
+        .map_err(|_e| HostError::from(soroban_env_host::Error::from_type_and_code(
             soroban_env_host::xdr::ScErrorType::Context,
             soroban_env_host::xdr::ScErrorCode::InternalError,
         )))?;
 
     let encoded_resources = soroban_data.resources.to_xdr(Limits::none())
-        .map_err(|e| HostError::from(soroban_env_host::Error::from_type_and_code(
+        .map_err(|_e| HostError::from(soroban_env_host::Error::from_type_and_code(
             soroban_env_host::xdr::ScErrorType::Context,
             soroban_env_host::xdr::ScErrorCode::InternalError,
         )))?;
 
     let encoded_source = source.to_xdr(Limits::none())
-        .map_err(|e| HostError::from(soroban_env_host::Error::from_type_and_code(
+        .map_err(|_e| HostError::from(soroban_env_host::Error::from_type_and_code(
             soroban_env_host::xdr::ScErrorType::Context,
             soroban_env_host::xdr::ScErrorCode::InternalError,
         )))?;
@@ -360,7 +362,7 @@ pub fn execute_host_function(
         .iter()
         .map(|e| e.to_xdr(Limits::none()))
         .collect::<Result<_, _>>()
-        .map_err(|e| HostError::from(soroban_env_host::Error::from_type_and_code(
+        .map_err(|_e| HostError::from(soroban_env_host::Error::from_type_and_code(
             soroban_env_host::xdr::ScErrorType::Context,
             soroban_env_host::xdr::ScErrorCode::InternalError,
         )))?;

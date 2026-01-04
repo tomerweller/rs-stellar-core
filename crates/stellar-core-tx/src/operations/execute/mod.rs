@@ -5,8 +5,7 @@
 
 use stellar_xdr::curr::{
     AccountId, ContractEvent, DiagnosticEvent, ExtendFootprintTtlResult, Operation, OperationBody,
-    OperationResult, OperationResultTr, RestoreFootprintResult, SorobanTransactionData, Limits,
-    WriteXdr,
+    OperationResult, OperationResultTr, RestoreFootprintResult, SorobanTransactionData, WriteXdr,
 };
 use soroban_env_host::budget::Budget;
 use soroban_env_host::e2e_invoke::entry_size_for_rent;
@@ -486,6 +485,7 @@ pub fn execute_operation_with_soroban(
 }
 
 /// Create an OperationResult for unsupported operations.
+#[allow(dead_code)]
 fn make_not_supported_result() -> OperationResult {
     OperationResult::OpNotSupported
 }

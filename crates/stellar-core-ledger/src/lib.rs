@@ -122,7 +122,7 @@ pub enum LedgerChange {
 
 /// Fee calculation utilities.
 pub mod fees {
-    use stellar_xdr::curr::{AccountEntry, Transaction, TransactionEnvelope, Operation};
+    use stellar_xdr::curr::{AccountEntry, Transaction, TransactionEnvelope};
 
     /// Calculate the fee for a transaction.
     ///

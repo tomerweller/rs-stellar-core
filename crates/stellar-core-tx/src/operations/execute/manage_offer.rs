@@ -537,6 +537,7 @@ fn validate_offer(
     Ok(())
 }
 
+#[allow(dead_code)]
 const AUTH_REQUIRED_FLAG: u32 = 0x1;
 const AUTHORIZED_FLAG: u32 = TrustLineFlags::AuthorizedFlag as u32;
 const AUTHORIZED_TO_MAINTAIN_LIABILITIES_FLAG: u32 =
@@ -560,6 +561,7 @@ fn issuer_for_asset(asset: &Asset) -> Option<&AccountId> {
 
 
 /// Create a new offer.
+#[allow(dead_code)]
 fn create_offer(
     source: &AccountId,
     selling: &Asset,
@@ -645,6 +647,7 @@ fn create_offer(
 }
 
 /// Update an existing offer.
+#[allow(dead_code)]
 fn update_offer(
     source: &AccountId,
     offer_id: i64,
@@ -943,6 +946,7 @@ fn apply_balance_delta(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 enum ConvertResult {
     Ok,
     Partial,
@@ -952,6 +956,7 @@ enum ConvertResult {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 enum OfferFilterResult {
     Keep,
     Skip,
@@ -1293,7 +1298,7 @@ fn create_offer_entry(
 fn convert_sell_to_buy_result(
     result: ManageSellOfferResult,
 ) -> stellar_xdr::curr::ManageBuyOfferResult {
-    use stellar_xdr::curr::{ManageBuyOfferResult, ManageBuyOfferResultCode};
+    use stellar_xdr::curr::ManageBuyOfferResult;
 
     match result {
         ManageSellOfferResult::Success(s) => ManageBuyOfferResult::Success(s),

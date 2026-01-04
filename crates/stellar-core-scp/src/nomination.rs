@@ -465,7 +465,7 @@ impl NominationProtocol {
         value: &Value,
         local_quorum_set: &ScpQuorumSet,
         driver: &Arc<D>,
-        slot_index: u64,
+        _slot_index: u64,
     ) -> bool {
         let voters = self.get_nodes_that_voted(value);
         let acceptors = self.get_nodes_that_accepted(value);
@@ -496,9 +496,9 @@ impl NominationProtocol {
         let mut best: Option<(u64, Value)> = None;
         let mut found_valid = false;
 
-        let mut consider_value = |value: &Value,
-                                  found_valid: &mut bool,
-                                  best: &mut Option<(u64, Value)>| {
+        let consider_value = |value: &Value,
+                              found_valid: &mut bool,
+                              best: &mut Option<(u64, Value)>| {
             let candidate = match driver.validate_value(slot_index, value, true) {
                 ValidationLevel::FullyValidated => {
                     *found_valid = true;

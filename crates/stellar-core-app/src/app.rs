@@ -48,7 +48,7 @@ use stellar_core_db::{
 use stellar_core_scp::hash_quorum_set;
 use x25519_dalek::{PublicKey as CurvePublicKey, StaticSecret as CurveSecretKey};
 use stellar_xdr::curr::{
-    Curve25519Public, DontHave, EncryptedBody, FloodAdvert, FloodDemand, GeneralizedTransactionSet,
+    Curve25519Public, DontHave, EncryptedBody, FloodAdvert, FloodDemand,
     Hash, LedgerCloseMeta, LedgerUpgrade, MessageType, ReadXdr, ScpEnvelope,
     SignedTimeSlicedSurveyResponseMessage, StellarMessage, StellarValue, SurveyMessageCommandType,
     SurveyRequestMessage, SurveyResponseBody, SurveyResponseMessage, TimeSlicedSurveyRequestMessage,
@@ -178,6 +178,7 @@ pub struct App {
     /// Database connection.
     db: stellar_core_db::Database,
     /// Lock file handle to prevent multiple instances.
+    #[allow(dead_code)]
     db_lock: Option<File>,
 
     /// Node keypair.

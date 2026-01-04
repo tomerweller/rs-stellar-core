@@ -16,7 +16,6 @@ use crate::archive_state::HistoryArchiveState;
 use crate::download::{
     create_client, decompress_gzip, download_with_retries, parse_record_marked_xdr_stream,
     DownloadConfig,
-    DEFAULT_TIMEOUT,
 };
 use crate::error::HistoryError;
 use crate::paths::{bucket_path, checkpoint_path, root_has_path};

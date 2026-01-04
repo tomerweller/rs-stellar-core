@@ -1,7 +1,7 @@
 //! AccountMerge operation execution.
 
 use stellar_xdr::curr::{
-    AccountEntry, AccountEntryExt, AccountEntryExtensionV1, AccountEntryExtensionV1Ext, AccountId,
+    AccountEntry, AccountEntryExt, AccountEntryExtensionV1Ext, AccountId,
     AccountMergeResult, AccountMergeResultCode, Liabilities, MuxedAccount, OperationResult,
     OperationResultTr, LedgerKey, LedgerKeyAccount, SponsorshipDescriptor,
 };

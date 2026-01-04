@@ -10,6 +10,7 @@ const VERSION_SEED: u8 = 18 << 3; // 'S' prefix
 const VERSION_PRE_AUTH_TX: u8 = 19 << 3; // 'T' prefix
 const VERSION_SHA256_HASH: u8 = 23 << 3; // 'X' prefix
 const VERSION_MUXED_ACCOUNT: u8 = 12 << 3; // 'M' prefix
+#[allow(dead_code)]
 const VERSION_SIGNED_PAYLOAD: u8 = 15 << 3; // 'P' prefix
 
 /// Encode an account ID (G...).

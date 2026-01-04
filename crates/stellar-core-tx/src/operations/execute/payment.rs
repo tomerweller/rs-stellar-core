@@ -4,10 +4,9 @@
 //! which transfers assets between accounts.
 
 use stellar_xdr::curr::{
-    AccountEntry, AccountEntryExt, AccountEntryExtensionV1, AccountEntryExtensionV1Ext, AccountId,
-    Asset, Liabilities, OperationResult, OperationResultTr, PaymentOp, PaymentResult,
-    PaymentResultCode, TrustLineEntry, TrustLineEntryExt, TrustLineEntryV1, TrustLineEntryV1Ext,
-    TrustLineFlags,
+    AccountEntry, AccountEntryExt, AccountId, Asset, Liabilities, OperationResult,
+    OperationResultTr, PaymentOp, PaymentResult, PaymentResultCode, TrustLineEntry,
+    TrustLineEntryExt, TrustLineFlags,
 };
 
 use crate::frame::muxed_to_account_id;

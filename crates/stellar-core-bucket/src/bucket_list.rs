@@ -373,7 +373,7 @@ impl BucketList {
         //   3. For each receiving level, merge its ORIGINAL curr with incoming spill
 
         // Collect original curr values
-        let mut original_currs: Vec<Bucket> = self.levels.iter()
+        let original_currs: Vec<Bucket> = self.levels.iter()
             .map(|level| level.curr.clone())
             .collect();
 
@@ -572,7 +572,6 @@ pub struct BucketListStats {
 mod tests {
     use super::*;
     use stellar_xdr::curr::*;
-    use crate::BucketEntry; // Re-import to shadow XDR's BucketEntry
 
     const TEST_PROTOCOL: u32 = 25;
 

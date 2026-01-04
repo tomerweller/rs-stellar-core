@@ -2,7 +2,7 @@
 
 use rusqlite::{Connection, OptionalExtension, params};
 use stellar_core_common::Hash256;
-use stellar_xdr::curr::{LedgerHeader, ReadXdr, WriteXdr, Limits};
+use stellar_xdr::curr::{LedgerHeader, ReadXdr, Limits};
 
 use super::super::error::DbError;
 
@@ -101,8 +101,7 @@ mod tests {
     use super::*;
     use rusqlite::Connection;
     use stellar_xdr::curr::{
-        Hash, LedgerHeader, LedgerHeaderExt, StellarValue, StellarValueExt,
-        TimePoint, Uint256,
+        Hash, LedgerHeader, LedgerHeaderExt, StellarValue, StellarValueExt, TimePoint, WriteXdr,
     };
 
     fn setup_db() -> Connection {

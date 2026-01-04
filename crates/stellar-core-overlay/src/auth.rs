@@ -12,10 +12,10 @@ use crate::{LocalNode, OverlayError, PeerId, Result};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use stellar_core_common::Hash256;
-use stellar_core_crypto::{PublicKey, SecretKey};
+use stellar_core_crypto::PublicKey;
 use stellar_xdr::curr::{
     self as xdr, AuthCert as XdrAuthCert, AuthenticatedMessage, AuthenticatedMessageV0, Curve25519Public,
-    Curve25519Secret, EnvelopeType, Hello, HmacSha256Key, HmacSha256Mac, ReadXdr, StellarMessage,
+    EnvelopeType, Hello, HmacSha256Key, HmacSha256Mac, StellarMessage,
     Uint256, WriteXdr,
 };
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey, SharedSecret};
@@ -538,6 +538,7 @@ impl AuthContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stellar_core_crypto::SecretKey;
 
     #[test]
     fn test_auth_cert_creation() {

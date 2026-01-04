@@ -26,9 +26,9 @@ use stellar_core_tx::{
 use stellar_xdr::curr::{
     AccountEntry, AccountId, AccountMergeResult, AllowTrustOp, AlphaNum4, AlphaNum12, Asset,
     AssetCode, ClaimableBalanceEntry, ClaimableBalanceId, ConfigSettingEntry, ConfigSettingId,
-    ContractCostParams, ContractEvent, CreateClaimableBalanceResult,
-    DataEntry, DiagnosticEvent, ExtensionPoint, Hash, InflationResult, LedgerEntry,
-    LedgerEntryChange, LedgerEntryChanges, LedgerEntryData, LedgerEntryExt, LedgerHeader, LedgerKey,
+    ContractCostParams, ContractEvent, CreateClaimableBalanceResult, DiagnosticEvent, ExtensionPoint,
+    InflationResult, LedgerEntry, LedgerEntryChange, LedgerEntryChanges, LedgerEntryData,
+    LedgerHeader, LedgerKey,
     LedgerKeyClaimableBalance, LedgerKeyConfigSetting, LedgerKeyLiquidityPool, LiquidityPoolEntry,
     LiquidityPoolEntryBody,
     ManageBuyOfferResult, ManageSellOfferResult, MuxedAccount, OfferEntry, Operation, OperationBody,
@@ -36,9 +36,9 @@ use stellar_xdr::curr::{
     OperationResult, OperationResultTr, PathPaymentStrictReceiveResult,
     PathPaymentStrictSendResult, Preconditions, ScAddress, SignerKey, SorobanTransactionMetaExt,
     SorobanTransactionMetaV2, TransactionEnvelope, TransactionEvent, TransactionEventStage,
-    TransactionMeta, TransactionMetaV4, TransactionResult, TransactionResultCode,
-    TransactionResultExt, TransactionResultMetaV1, TransactionResultPair, TransactionResultResult,
-    TrustLineAsset, TrustLineEntry, TrustLineFlags, VecM, WriteXdr, Limits,
+    TransactionMeta, TransactionMetaV4, TransactionResult, TransactionResultExt,
+    TransactionResultMetaV1, TransactionResultPair, TransactionResultResult, TrustLineAsset,
+    TrustLineFlags, VecM, WriteXdr, Limits,
     InnerTransactionResult, PoolId,
     InnerTransactionResultExt, InnerTransactionResultPair, InnerTransactionResultResult,
 };
@@ -385,6 +385,7 @@ pub struct TransactionExecutor {
     /// Close time.
     close_time: u64,
     /// Base fee.
+    #[allow(dead_code)]
     base_fee: u32,
     /// Base reserve.
     base_reserve: u32,
@@ -724,7 +725,7 @@ impl TransactionExecutor {
         base_fee: u32,
         soroban_prng_seed: Option<[u8; 32]>,
     ) -> Result<TransactionExecutionResult> {
-        let mut frame = TransactionFrame::with_network(tx_envelope.clone(), self.network_id.clone());
+        let frame = TransactionFrame::with_network(tx_envelope.clone(), self.network_id.clone());
         let fee_source_id = stellar_core_tx::muxed_to_account_id(&frame.fee_source_account());
         let inner_source_id = stellar_core_tx::muxed_to_account_id(&frame.inner_source_account());
 
@@ -1476,7 +1477,7 @@ impl TransactionExecutor {
 
         // Load destination accounts based on operation type
         match &op.body {
-            OperationBody::CreateAccount(op_data) => {
+            OperationBody::CreateAccount(_op_data) => {
                 // Don't load destination - it shouldn't exist
             }
             OperationBody::BeginSponsoringFutureReserves(op_data) => {
@@ -2711,7 +2712,7 @@ mod tests {
     use super::*;
     use stellar_xdr::curr::{
         AccountId, Asset, AssetCode4, AlphaNum4, LedgerEntry, LedgerEntryData, LedgerEntryExt,
-        OfferEntry, OfferEntryExt, Price, PublicKey, Uint256, VecM, LedgerEntryChange,
+        OfferEntry, OfferEntryExt, Price, PublicKey, Uint256, LedgerEntryChange,
     };
 
     #[test]

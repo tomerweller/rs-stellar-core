@@ -7,9 +7,8 @@
 use stellar_core_common::Hash256;
 use stellar_core_crypto::Sha256Hasher;
 use stellar_xdr::curr::{
-    GeneralizedTransactionSet, Hash, LedgerCloseMeta, LedgerHeader, LedgerUpgrade,
-    TransactionEnvelope, TransactionResult, TransactionResultPair, TransactionResultSet,
-    TransactionSet, UpgradeType, WriteXdr, Limits,
+    GeneralizedTransactionSet, LedgerCloseMeta, LedgerHeader, LedgerUpgrade, TransactionEnvelope,
+    TransactionResultPair, TransactionResultSet, TransactionSet, Limits, WriteXdr,
 };
 use std::cmp::Ordering;
 use std::collections::HashMap;

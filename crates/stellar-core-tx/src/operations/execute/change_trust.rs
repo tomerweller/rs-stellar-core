@@ -35,7 +35,7 @@ pub fn execute_change_trust(
     };
     let is_pool_share = pool_params.is_some();
     let multiplier: i64 = if is_pool_share { 2 } else { 1 };
-    let tl_asset = changeTrustAssetToTrustLineAsset(&op.line);
+    let tl_asset = change_trust_asset_to_trust_line_asset(&op.line);
 
     // Check not trusting self
     if let Some(asset) = &maybe_asset {
@@ -213,7 +213,9 @@ pub fn execute_change_trust(
     Ok(make_result(ChangeTrustResultCode::Success))
 }
 
-fn changeTrustAssetToTrustLineAsset(asset: &ChangeTrustAsset) -> stellar_xdr::curr::TrustLineAsset {
+fn change_trust_asset_to_trust_line_asset(
+    asset: &ChangeTrustAsset,
+) -> stellar_xdr::curr::TrustLineAsset {
     use sha2::{Digest, Sha256};
     use stellar_xdr::curr::{Limits, PoolId, Hash, WriteXdr};
 

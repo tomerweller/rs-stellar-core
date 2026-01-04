@@ -2,8 +2,8 @@
 
 use rusqlite::{Connection, OptionalExtension, params};
 use stellar_xdr::curr::{
-    AccountEntry, AccountEntryExt, AccountId, Liabilities, PublicKey, Signer, String32, Thresholds,
-    Uint256, ReadXdr, WriteXdr, Limits,
+    AccountEntry, AccountEntryExt, AccountId, Liabilities, PublicKey, Signer, Thresholds, ReadXdr,
+    WriteXdr, Limits,
 };
 
 use super::super::error::DbError;
@@ -236,6 +236,7 @@ impl AccountQueries for Connection {
 mod tests {
     use super::*;
     use rusqlite::Connection;
+    use stellar_xdr::curr::{String32, Uint256};
 
     fn setup_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
